@@ -12,24 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//+build wireinject
+//go:build wireinject
+// +build wireinject
 
 package main
 
 import (
-	"github.com/google/wire"
+	"github.com/goforj/wire"
 )
 
 func injectFooBar() FooBar {
 	wire.Build(
-		provideFoo,                       // needed as input for provideBar
-		provideBar,                       // needed for FooBar
-		partiallyUsedSet,                 // 1/2 providers in the set are needed
-		provideUnused,                    // not needed -> error
-		wire.Value("unused"),             // not needed -> error
-		unusedSet,                        // nothing in set is needed -> error
-		wire.Bind(new(Fooer), new(*Foo)), // binding to Fooer is not needed -> error
-		wire.FieldsOf(new(S), "Cfg"),     // S.Cfg not needed -> error
+		provideFoo,                                 // needed as input for provideBar
+		provideBar,                                 // needed for FooBar
+		partiallyUsedSet,                           // 1/2 providers in the set are needed
+		provideUnused,                              // not needed -> error
+		wire.Value("unused"),                       // not needed -> error
+		unusedSet,                                  // nothing in set is needed -> error
+		wire.Bind(new(Fooer), new(*Foo)),           // binding to Fooer is not needed -> error
+		wire.FieldsOf(new(S), "Cfg"),               // S.Cfg not needed -> error
 		wire.Struct(new(FooBar), "MyFoo", "MyBar"), // needed for FooBar
 	)
 	return FooBar{}

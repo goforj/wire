@@ -39,8 +39,8 @@ func TestCacheInvalidation(t *testing.T) {
 		"",
 		"go 1.19",
 		"",
-		"require github.com/google/wire v0.0.0",
-		"replace github.com/google/wire => " + repoRoot,
+		"require github.com/goforj/wire v0.0.0",
+		"replace github.com/goforj/wire => " + repoRoot,
 		"",
 	}, "\n"))
 
@@ -52,7 +52,7 @@ func TestCacheInvalidation(t *testing.T) {
 		"",
 		"import (",
 		"\t\"example.com/app/dep\"",
-		"\t\"github.com/google/wire\"",
+		"\t\"github.com/goforj/wire\"",
 		")",
 		"",
 		"func Init() string {",
@@ -145,8 +145,8 @@ func TestManifestInvalidation(t *testing.T) {
 		"",
 		"go 1.19",
 		"",
-		"require github.com/google/wire v0.0.0",
-		"replace github.com/google/wire => " + repoRoot,
+		"require github.com/goforj/wire v0.0.0",
+		"replace github.com/goforj/wire => " + repoRoot,
 		"",
 	}, "\n"))
 
@@ -158,7 +158,7 @@ func TestManifestInvalidation(t *testing.T) {
 		"",
 		"import (",
 		"\t\"example.com/app/dep\"",
-		"\t\"github.com/google/wire\"",
+		"\t\"github.com/goforj/wire\"",
 		")",
 		"",
 		"func Init() string {",
