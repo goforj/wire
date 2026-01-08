@@ -39,12 +39,30 @@ global variables. Because Wire operates without runtime state or reflection,
 code written to be used with Wire is useful even for hand-written
 initialization.
 
-For an overview, see the [introductory blog post][].
+For an overview, see the [introductory blog post](https://blog.golang.org/wire).
 
 [dependency injection]: https://en.wikipedia.org/wiki/Dependency_injection
-[introductory blog post]: https://blog.golang.org/wire
 [godoc]: https://godoc.org/github.com/goforj/wire
-[travis]: https://travis-ci.com/google/wire
+
+## Installing
+
+```sh
+go install github.com/goforj/wire/cmd/wire@latest
+```
+
+Ensure `$GOPATH/bin` is in your `$PATH`.
+
+## Compatibility with google/wire
+
+Wire remains compatible with codebases that import `github.com/google/wire`.
+The generator emits a `//go:generate` directive pointing at this fork so
+`go generate` consistently uses the maintained toolchain.
+
+To keep existing imports unchanged:
+
+```sh
+go mod edit -replace=github.com/google/wire=github.com/goforj/wire@latest
+```
 
 ## How Wire Works (in 60 seconds)
 
@@ -123,26 +141,6 @@ wire
 
 Wire produces `wire_gen.go` containing explicit initialization code with no
 runtime dependency on Wire.
-
-## Installing
-
-```sh
-go install github.com/goforj/wire/cmd/wire@latest
-```
-
-Ensure `$GOPATH/bin` is in your `$PATH`.
-
-## Compatibility with google/wire
-
-Wire remains compatible with codebases that import `github.com/google/wire`.
-The generator emits a `//go:generate` directive pointing at this fork so
-`go generate` consistently uses the maintained toolchain.
-
-To keep existing imports unchanged:
-
-```sh
-go mod edit -replace=github.com/google/wire=github.com/goforj/wire@latest
-```
 
 ## Design Guidance
 
