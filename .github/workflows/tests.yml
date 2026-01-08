@@ -33,3 +33,14 @@ jobs:
       - name: Run Tests
         shell: bash
         run: 'internal/runtests.sh'
+
+      - name: Run tests
+        run: go test ./... -v
+
+      - name: Run tests with coverage
+        run: go test -coverprofile=coverage.txt
+
+      - name: Upload results to Codecov
+        uses: codecov/codecov-action@v5
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
