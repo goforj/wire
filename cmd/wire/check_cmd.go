@@ -30,10 +30,15 @@ type checkCmd struct {
 	profile profileFlags
 }
 
+// Name returns the subcommand name.
 func (*checkCmd) Name() string { return "check" }
+
+// Synopsis returns a short summary of the subcommand.
 func (*checkCmd) Synopsis() string {
 	return "print any Wire errors found"
 }
+
+// Usage returns the help text for the subcommand.
 func (*checkCmd) Usage() string {
 	return `check [-tags tag,list] [packages]
 
@@ -43,10 +48,14 @@ func (*checkCmd) Usage() string {
   If no packages are listed, it defaults to ".".
 `
 }
+
+// SetFlags registers flags for the subcommand.
 func (cmd *checkCmd) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&cmd.tags, "tags", "", "append build tags to the default wirebuild")
 	cmd.profile.addFlags(f)
 }
+
+// Execute runs the subcommand.
 func (cmd *checkCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
 	stop, err := cmd.profile.start()
 	if err != nil {

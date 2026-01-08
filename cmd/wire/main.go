@@ -36,6 +36,7 @@ import (
 	"github.com/google/subcommands"
 )
 
+// main wires up subcommands and executes the selected command.
 func main() {
 	subcommands.Register(subcommands.CommandsCommand(), "")
 	subcommands.Register(subcommands.FlagsCommand(), "")
@@ -44,7 +45,6 @@ func main() {
 	subcommands.Register(&cacheCmd{}, "")
 	subcommands.Register(&diffCmd{}, "")
 	subcommands.Register(&genCmd{}, "")
-	subcommands.Register(&serveCmd{}, "")
 	subcommands.Register(&showCmd{}, "")
 	flag.Parse()
 
@@ -77,6 +77,7 @@ func main() {
 	os.Exit(int(subcommands.Execute(context.Background())))
 }
 
+// installStackDumper registers signal handlers to dump goroutine stacks.
 func installStackDumper() {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGQUIT, syscall.SIGUSR1)
@@ -90,6 +91,7 @@ func installStackDumper() {
 
 // packages returns the slice of packages to run wire over based on f.
 // It defaults to ".".
+// packages returns the packages selected by command-line args.
 func packages(f *flag.FlagSet) []string {
 	pkgs := f.Args()
 	if len(pkgs) == 0 {
@@ -105,6 +107,7 @@ type profileFlags struct {
 	timings      bool
 }
 
+// addFlags registers profiling flags on the provided FlagSet.
 func (pf *profileFlags) addFlags(f *flag.FlagSet) {
 	f.StringVar(&pf.cpuProfile, "cpuprofile", "", "write CPU profile to file")
 	f.StringVar(&pf.memProfile, "memprofile", "", "write memory profile to file")
@@ -112,6 +115,7 @@ func (pf *profileFlags) addFlags(f *flag.FlagSet) {
 	f.BoolVar(&pf.timings, "timings", false, "log timing information for major steps")
 }
 
+// start enables configured profiles and returns a stop function.
 func (pf *profileFlags) start() (func(), error) {
 	var cpuFile *os.File
 	var traceFile *os.File
@@ -173,12 +177,14 @@ func (pf *profileFlags) start() (func(), error) {
 	return stop, nil
 }
 
+// logTiming writes a timing log entry when enabled.
 func logTiming(enabled bool, label string, start time.Time) {
 	if enabled {
 		log.Printf("timing: %s=%s", label, time.Since(start))
 	}
 }
 
+// withTiming attaches a timing logger to the context when enabled.
 func withTiming(ctx context.Context, enabled bool) context.Context {
 	if !enabled {
 		return ctx
@@ -190,6 +196,7 @@ func withTiming(ctx context.Context, enabled bool) context.Context {
 
 // newGenerateOptions returns an initialized wire.GenerateOptions, possibly
 // with the Header option set.
+// newGenerateOptions builds GenerateOptions, loading the header if set.
 func newGenerateOptions(headerFile string) (*wire.GenerateOptions, error) {
 	opts := new(wire.GenerateOptions)
 	if headerFile != "" {
@@ -202,6 +209,7 @@ func newGenerateOptions(headerFile string) (*wire.GenerateOptions, error) {
 	return opts, nil
 }
 
+// logErrors logs each error with consistent formatting.
 func logErrors(errs []error) {
 	for _, err := range errs {
 		log.Println(strings.Replace(err.Error(), "\n", "\n\t", -1))

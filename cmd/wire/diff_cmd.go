@@ -34,10 +34,15 @@ type diffCmd struct {
 	profile    profileFlags
 }
 
+// Name returns the subcommand name.
 func (*diffCmd) Name() string { return "diff" }
+
+// Synopsis returns a short summary of the subcommand.
 func (*diffCmd) Synopsis() string {
 	return "output a diff between existing wire_gen.go files and what gen would generate"
 }
+
+// Usage returns the help text for the subcommand.
 func (*diffCmd) Usage() string {
 	return `diff [packages]
 
@@ -50,11 +55,15 @@ func (*diffCmd) Usage() string {
   plus an error if trouble.
 `
 }
+
+// SetFlags registers flags for the subcommand.
 func (cmd *diffCmd) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&cmd.headerFile, "header_file", "", "path to file to insert as a header in wire_gen.go")
 	f.StringVar(&cmd.tags, "tags", "", "append build tags to the default wirebuild")
 	cmd.profile.addFlags(f)
 }
+
+// Execute runs the subcommand.
 func (cmd *diffCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
 	const (
 		errReturn  = subcommands.ExitStatus(2)

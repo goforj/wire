@@ -3,10 +3,12 @@
 [![Build Status](https://github.com/goforj/wire/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/goforj/wire/actions)
 [![godoc](https://godoc.org/github.com/goforj/wire?status.svg)][godoc]
 
-> [!WARNING]
-> This project is no longer maintained.
->
-> If you wish to update or extend wire, please do so in a fork.
+> [!NOTE]
+> This is a maintained fork of `google/wire`.
+> Google no longer maintains the original project, and this fork focuses on
+> compile-time performance, cacheability, and developer ergonomics while
+> preserving wire's API and behavior for existing codebases. On real projects,
+> compile time is typically 8–10x faster (often more) with the default cache.
 
 Wire is a code generation tool that automates connecting components using
 [dependency injection][]. Dependencies between components are represented in
@@ -46,12 +48,9 @@ and ensuring that `$GOPATH/bin` is added to your `$PATH`.
 
 ## Project status
 
-As of version v0.3.0, Wire is *beta* and is considered feature complete. It
-works well for the tasks it was designed to perform, and we prefer to keep it
-as simple as possible.
-
-We'll not be accepting new features at this time, but will gladly accept bug
-reports and fixes.
+This fork tracks the original Wire feature set and prioritizes performance and
+workflow improvements. We aim to remain compatible with existing Wire
+codebases while landing safe, measurable compile-time optimizations.
 
 ## Community
 

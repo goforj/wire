@@ -32,10 +32,15 @@ type genCmd struct {
 	profile        profileFlags
 }
 
+// Name returns the subcommand name.
 func (*genCmd) Name() string { return "gen" }
+
+// Synopsis returns a short summary of the subcommand.
 func (*genCmd) Synopsis() string {
 	return "generate the wire_gen.go file for each package"
 }
+
+// Usage returns the help text for the subcommand.
 func (*genCmd) Usage() string {
 	return `gen [packages]
 
@@ -44,6 +49,8 @@ func (*genCmd) Usage() string {
   If no packages are listed, it defaults to ".".
 `
 }
+
+// SetFlags registers flags for the subcommand.
 func (cmd *genCmd) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&cmd.headerFile, "header_file", "", "path to file to insert as a header in wire_gen.go")
 	f.StringVar(&cmd.prefixFileName, "output_file_prefix", "", "string to prepend to output file names.")
@@ -51,6 +58,7 @@ func (cmd *genCmd) SetFlags(f *flag.FlagSet) {
 	cmd.profile.addFlags(f)
 }
 
+// Execute runs the subcommand.
 func (cmd *genCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
 	stop, err := cmd.profile.start()
 	if err != nil {

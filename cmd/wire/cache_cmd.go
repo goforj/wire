@@ -28,19 +28,28 @@ type cacheCmd struct {
 	clear bool
 }
 
+// Name returns the subcommand name.
 func (*cacheCmd) Name() string { return "cache" }
+
+// Synopsis returns a short summary of the subcommand.
 func (*cacheCmd) Synopsis() string {
 	return "inspect or clear the wire cache"
 }
+
+// Usage returns the help text for the subcommand.
 func (*cacheCmd) Usage() string {
 	return `cache [-clear]
 
   By default, prints the cache directory. With -clear, removes all cache files.
 `
 }
+
+// SetFlags registers flags for the subcommand.
 func (cmd *cacheCmd) SetFlags(f *flag.FlagSet) {
 	f.BoolVar(&cmd.clear, "clear", false, "remove all cached data")
 }
+
+// Execute runs the subcommand.
 func (cmd *cacheCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
 	if cmd.clear {
 		if err := wire.ClearCache(); err != nil {

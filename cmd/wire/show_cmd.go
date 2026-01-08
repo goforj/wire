@@ -38,10 +38,15 @@ type showCmd struct {
 	profile profileFlags
 }
 
+// Name returns the subcommand name.
 func (*showCmd) Name() string { return "show" }
+
+// Synopsis returns a short summary of the subcommand.
 func (*showCmd) Synopsis() string {
 	return "describe all top-level provider sets"
 }
+
+// Usage returns the help text for the subcommand.
 func (*showCmd) Usage() string {
 	return `show [packages]
 
@@ -53,10 +58,14 @@ func (*showCmd) Usage() string {
   If no packages are listed, it defaults to ".".
 `
 }
+
+// SetFlags registers flags for the subcommand.
 func (cmd *showCmd) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&cmd.tags, "tags", "", "append build tags to the default wirebuild")
 	cmd.profile.addFlags(f)
 }
+
+// Execute runs the subcommand.
 func (cmd *showCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
 	stop, err := cmd.profile.start()
 	if err != nil {
@@ -148,6 +157,7 @@ type outGroup struct {
 // gather flattens a provider set into outputs grouped by the inputs
 // required to create them. As it flattens the provider set, it records
 // the visited named provider sets as imports.
+// gather flattens a provider set into output groups and imports.
 func gather(info *wire.Info, key wire.ProviderSetID) (_ []outGroup, imports map[string]struct{}) {
 	set := info.Sets[key]
 	hash := typeutil.MakeHasher()
@@ -319,12 +329,14 @@ func gather(info *wire.Info, key wire.ProviderSetID) (_ []outGroup, imports map[
 	return groups, imports
 }
 
+// mergeTypeSets merges source keys into the destination set.
 func mergeTypeSets(dst, src *typeutil.Map) {
 	src.Iterate(func(k types.Type, _ interface{}) {
 		dst.Set(k, true)
 	})
 }
 
+// sameTypeKeys reports whether two maps contain the same keys.
 func sameTypeKeys(a, b *typeutil.Map) bool {
 	if a.Len() != b.Len() {
 		return false
@@ -338,6 +350,7 @@ func sameTypeKeys(a, b *typeutil.Map) bool {
 	return same
 }
 
+// sortSet returns a sorted list of map keys as strings.
 func sortSet(set interface{}) []string {
 	rv := reflect.ValueOf(set)
 	a := make([]string, 0, rv.Len())
@@ -349,6 +362,7 @@ func sortSet(set interface{}) []string {
 	return a
 }
 
+// formatProviderSetName renders the provider set name for display.
 func formatProviderSetName(importPath, varName string) string {
 	// Since varName is an identifier, it doesn't make sense to quote.
 	return strconv.Quote(importPath) + "." + varName
