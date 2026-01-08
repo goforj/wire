@@ -26,9 +26,9 @@
 > The original project is no longer actively maintained.
 > This fork preserves Wire’s API and behavior while focusing on:
 >
-> - Faster compile times via caching
+> - 8-10x+ Faster compile times
 > - Improved generator determinism
-> - Better documentation and developer ergonomics
+> - Better documentation and developer ergonomics (wire watch etc.)
 >
 > Existing Wire codebases should work without modification.
 
