@@ -24,12 +24,10 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
-	"os/signal"
 	"runtime"
 	"runtime/pprof"
 	"runtime/trace"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/goforj/wire/internal/wire"
@@ -52,7 +50,6 @@ func main() {
 	log.SetFlags(0)
 	log.SetPrefix("wire: ")
 	log.SetOutput(os.Stderr)
-	installStackDumper()
 
 	// TODO(rvangent): Use subcommands's VisitCommands instead of hardcoded map,
 	// once there is a release that contains it:
@@ -78,17 +75,6 @@ func main() {
 }
 
 // installStackDumper registers signal handlers to dump goroutine stacks.
-func installStackDumper() {
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGQUIT, syscall.SIGUSR1)
-	go func() {
-		for range ch {
-			log.Println("stack dump:")
-			pprof.Lookup("goroutine").WriteTo(os.Stderr, 2)
-		}
-	}()
-}
-
 // packages returns the slice of packages to run wire over based on f.
 // It defaults to ".".
 // packages returns the packages selected by command-line args.
