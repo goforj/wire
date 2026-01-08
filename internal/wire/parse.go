@@ -19,12 +19,15 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/packages"
@@ -249,7 +252,9 @@ type Field struct {
 // In case of duplicate environment variables, the last one in the list
 // takes precedence.
 func Load(ctx context.Context, wd string, env []string, tags string, patterns []string) (*Info, []error) {
-	pkgs, errs := load(ctx, wd, env, tags, patterns)
+	loadStart := time.Now()
+	pkgs, loader, errs := load(ctx, wd, env, tags, patterns)
+	logTiming(ctx, "load.packages", loadStart)
 	if len(errs) > 0 {
 		return nil, errs
 	}
@@ -261,14 +266,22 @@ func Load(ctx context.Context, wd string, env []string, tags string, patterns []
 		Fset: fset,
 		Sets: make(map[ProviderSetID]*ProviderSet),
 	}
-	oc := newObjectCache(pkgs)
+	oc := newObjectCache(pkgs, loader)
 	ec := new(errorCollector)
 	for _, pkg := range pkgs {
 		if isWireImport(pkg.PkgPath) {
 			// The marker function package confuses analysis.
 			continue
 		}
+		if loaded, errs := oc.ensurePackage(pkg.PkgPath); len(errs) > 0 {
+			ec.add(errs...)
+			continue
+		} else if loaded != nil {
+			pkg = loaded
+		}
+		pkgStart := time.Now()
 		scope := pkg.Types.Scope()
+		setStart := time.Now()
 		for _, name := range scope.Names() {
 			obj := scope.Lookup(name)
 			if !isProviderSetType(obj.Type()) {
@@ -285,6 +298,8 @@ func Load(ctx context.Context, wd string, env []string, tags string, patterns []
 			id := ProviderSetID{ImportPath: pset.PkgPath, VarName: name}
 			info.Sets[id] = pset
 		}
+		logTiming(ctx, "load.package."+pkg.PkgPath+".provider_sets", setStart)
+		injectorStart := time.Now()
 		for _, f := range pkg.Syntax {
 			for _, decl := range f.Decls {
 				fn, ok := decl.(*ast.FuncDecl)
@@ -335,6 +350,8 @@ func Load(ctx context.Context, wd string, env []string, tags string, patterns []
 				})
 			}
 		}
+		logTiming(ctx, "load.package."+pkg.PkgPath+".injectors", injectorStart)
+		logTiming(ctx, "load.package."+pkg.PkgPath+".total", pkgStart)
 	}
 	return info, ec.errors
 }
@@ -349,36 +366,149 @@ func Load(ctx context.Context, wd string, env []string, tags string, patterns []
 // env is nil or empty, it is interpreted as an empty set of variables.
 // In case of duplicate environment variables, the last one in the list
 // takes precedence.
-func load(ctx context.Context, wd string, env []string, tags string, patterns []string) ([]*packages.Package, []error) {
-	cfg := &packages.Config{
+func load(ctx context.Context, wd string, env []string, tags string, patterns []string) ([]*packages.Package, *lazyLoader, []error) {
+	fset := token.NewFileSet()
+	baseCfg := &packages.Config{
 		Context:    ctx,
-		Mode:       packages.LoadAllSyntax,
+		Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps,
 		Dir:        wd,
 		Env:        env,
 		BuildFlags: []string{"-tags=wireinject"},
-		// TODO(light): Use ParseFile to skip function bodies and comments in indirect packages.
+		Fset:       fset,
 	}
 	if len(tags) > 0 {
-		cfg.BuildFlags[0] += " " + tags
+		baseCfg.BuildFlags[0] += " " + tags
 	}
 	escaped := make([]string, len(patterns))
 	for i := range patterns {
 		escaped[i] = "pattern=" + patterns[i]
 	}
-	pkgs, err := packages.Load(cfg, escaped...)
+	baseLoadStart := time.Now()
+	pkgs, err := packages.Load(baseCfg, escaped...)
+	logTiming(ctx, "load.packages.base.load", baseLoadStart)
 	if err != nil {
-		return nil, []error{err}
+		return nil, nil, []error{err}
 	}
+	baseErrsStart := time.Now()
+	errs := collectLoadErrors(pkgs)
+	logTiming(ctx, "load.packages.base.collect_errors", baseErrsStart)
+	if len(errs) > 0 {
+		return nil, nil, errs
+	}
+
+	baseFiles := collectPackageFiles(pkgs)
+	loader := &lazyLoader{
+		ctx:       ctx,
+		wd:        wd,
+		env:       env,
+		tags:      tags,
+		fset:      fset,
+		baseFiles: baseFiles,
+	}
+	return pkgs, loader, nil
+}
+
+func collectLoadErrors(pkgs []*packages.Package) []error {
 	var errs []error
 	for _, p := range pkgs {
 		for _, e := range p.Errors {
 			errs = append(errs, e)
 		}
 	}
+	return errs
+}
+
+func collectPackageFiles(pkgs []*packages.Package) map[string]map[string]struct{} {
+	all := collectAllPackages(pkgs)
+	out := make(map[string]map[string]struct{}, len(all))
+	for path, pkg := range all {
+		if pkg == nil {
+			continue
+		}
+		files := make(map[string]struct{}, len(pkg.CompiledGoFiles))
+		for _, name := range pkg.CompiledGoFiles {
+			files[filepath.Clean(name)] = struct{}{}
+		}
+		if len(files) > 0 {
+			out[path] = files
+		}
+	}
+	return out
+}
+
+func collectAllPackages(pkgs []*packages.Package) map[string]*packages.Package {
+	all := make(map[string]*packages.Package)
+	stack := append([]*packages.Package(nil), pkgs...)
+	for len(stack) > 0 {
+		p := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if p == nil || all[p.PkgPath] != nil {
+			continue
+		}
+		all[p.PkgPath] = p
+		for _, imp := range p.Imports {
+			stack = append(stack, imp)
+		}
+	}
+	return all
+}
+
+type lazyLoader struct {
+	ctx       context.Context
+	wd        string
+	env       []string
+	tags      string
+	fset      *token.FileSet
+	baseFiles map[string]map[string]struct{}
+}
+
+func (ll *lazyLoader) load(pkgPath string) ([]*packages.Package, []error) {
+	cfg := &packages.Config{
+		Context:    ll.ctx,
+		Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax,
+		Dir:        ll.wd,
+		Env:        ll.env,
+		BuildFlags: []string{"-tags=wireinject"},
+		Fset:       ll.fset,
+		ParseFile:  ll.parseFileFor(pkgPath),
+	}
+	if len(ll.tags) > 0 {
+		cfg.BuildFlags[0] += " " + ll.tags
+	}
+	loadStart := time.Now()
+	pkgs, err := packages.Load(cfg, "pattern="+pkgPath)
+	logTiming(ll.ctx, "load.packages.lazy.load", loadStart)
+	if err != nil {
+		return nil, []error{err}
+	}
+	errs := collectLoadErrors(pkgs)
 	if len(errs) > 0 {
 		return nil, errs
 	}
 	return pkgs, nil
+}
+
+func (ll *lazyLoader) parseFileFor(pkgPath string) func(*token.FileSet, string, []byte) (*ast.File, error) {
+	primary := ll.baseFiles[pkgPath]
+	return func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+		file, err := parser.ParseFile(fset, filename, src, parser.ParseComments)
+		if err != nil {
+			return nil, err
+		}
+		if primary == nil {
+			return file, nil
+		}
+		if _, ok := primary[filepath.Clean(filename)]; ok {
+			return file, nil
+		}
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok {
+				fn.Body = nil
+				fn.Doc = nil
+			}
+		}
+		return file, nil
+	}
 }
 
 // Info holds the result of Load.
@@ -421,6 +551,7 @@ type objectCache struct {
 	packages map[string]*packages.Package
 	objects  map[objRef]objCacheEntry
 	hasher   typeutil.Hasher
+	loader   *lazyLoader
 }
 
 type objRef struct {
@@ -433,7 +564,7 @@ type objCacheEntry struct {
 	errs []error
 }
 
-func newObjectCache(pkgs []*packages.Package) *objectCache {
+func newObjectCache(pkgs []*packages.Package, loader *lazyLoader) *objectCache {
 	if len(pkgs) == 0 {
 		panic("object cache must have packages to draw from")
 	}
@@ -442,24 +573,59 @@ func newObjectCache(pkgs []*packages.Package) *objectCache {
 		packages: make(map[string]*packages.Package),
 		objects:  make(map[objRef]objCacheEntry),
 		hasher:   typeutil.MakeHasher(),
+		loader:   loader,
+	}
+	if oc.fset == nil && loader != nil {
+		oc.fset = loader.fset
 	}
 	// Depth-first search of all dependencies to gather import path to
 	// packages.Package mapping. go/packages guarantees that for a single
 	// call to packages.Load and an import path X, there will exist only
 	// one *packages.Package value with PkgPath X.
+	oc.registerPackages(pkgs, false)
+	return oc
+}
+
+func (oc *objectCache) registerPackages(pkgs []*packages.Package, replace bool) {
+	seen := make(map[string]struct{})
 	stk := append([]*packages.Package(nil), pkgs...)
 	for len(stk) > 0 {
 		p := stk[len(stk)-1]
 		stk = stk[:len(stk)-1]
-		if oc.packages[p.PkgPath] != nil {
+		if p == nil {
 			continue
 		}
-		oc.packages[p.PkgPath] = p
+		if _, ok := seen[p.PkgPath]; ok {
+			continue
+		}
+		seen[p.PkgPath] = struct{}{}
+		if _, exists := oc.packages[p.PkgPath]; !exists || replace {
+			oc.packages[p.PkgPath] = p
+		} else {
+			continue
+		}
 		for _, imp := range p.Imports {
 			stk = append(stk, imp)
 		}
 	}
-	return oc
+}
+
+func (oc *objectCache) ensurePackage(pkgPath string) (*packages.Package, []error) {
+	if pkg := oc.packages[pkgPath]; pkg != nil && pkg.TypesInfo != nil && len(pkg.Syntax) > 0 {
+		return pkg, nil
+	}
+	if oc.loader == nil {
+		if pkg := oc.packages[pkgPath]; pkg != nil {
+			return pkg, nil
+		}
+		return nil, []error{fmt.Errorf("package %q is missing type information", pkgPath)}
+	}
+	loaded, errs := oc.loader.load(pkgPath)
+	if len(errs) > 0 {
+		return nil, errs
+	}
+	oc.registerPackages(loaded, true)
+	return oc.packages[pkgPath], nil
 }
 
 // get converts a Go object into a Wire structure. It may return a *Provider, an
@@ -471,6 +637,9 @@ func (oc *objectCache) get(obj types.Object) (val interface{}, errs []error) {
 	}
 	if ent, cached := oc.objects[ref]; cached {
 		return ent.val, append([]error(nil), ent.errs...)
+	}
+	if _, errs := oc.ensurePackage(ref.importPath); len(errs) > 0 {
+		return nil, errs
 	}
 	defer func() {
 		oc.objects[ref] = objCacheEntry{

@@ -26,10 +26,16 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"os/signal"
 	"reflect"
+	"runtime"
+	"runtime/pprof"
+	"runtime/trace"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/google/subcommands"
 	"github.com/google/wire/internal/wire"
@@ -42,8 +48,10 @@ func main() {
 	subcommands.Register(subcommands.FlagsCommand(), "")
 	subcommands.Register(subcommands.HelpCommand(), "")
 	subcommands.Register(&checkCmd{}, "")
+	subcommands.Register(&cacheCmd{}, "")
 	subcommands.Register(&diffCmd{}, "")
 	subcommands.Register(&genCmd{}, "")
+	subcommands.Register(&serveCmd{}, "")
 	subcommands.Register(&showCmd{}, "")
 	flag.Parse()
 
@@ -51,6 +59,7 @@ func main() {
 	log.SetFlags(0)
 	log.SetPrefix("wire: ")
 	log.SetOutput(os.Stderr)
+	installStackDumper()
 
 	// TODO(rvangent): Use subcommands's VisitCommands instead of hardcoded map,
 	// once there is a release that contains it:
@@ -61,8 +70,10 @@ func main() {
 		"help":     true, // builtin
 		"flags":    true, // builtin
 		"check":    true,
+		"cache":    true,
 		"diff":     true,
 		"gen":      true,
+		"serve":    true,
 		"show":     true,
 	}
 	// Default to running the "gen" command.
@@ -73,6 +84,17 @@ func main() {
 	os.Exit(int(subcommands.Execute(context.Background())))
 }
 
+func installStackDumper() {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGQUIT, syscall.SIGUSR1)
+	go func() {
+		for range ch {
+			log.Println("stack dump:")
+			pprof.Lookup("goroutine").WriteTo(os.Stderr, 2)
+		}
+	}()
+}
+
 // packages returns the slice of packages to run wire over based on f.
 // It defaults to ".".
 func packages(f *flag.FlagSet) []string {
@@ -81,6 +103,96 @@ func packages(f *flag.FlagSet) []string {
 		pkgs = []string{"."}
 	}
 	return pkgs
+}
+
+type profileFlags struct {
+	cpuProfile   string
+	memProfile   string
+	traceProfile string
+	timings      bool
+}
+
+func (pf *profileFlags) addFlags(f *flag.FlagSet) {
+	f.StringVar(&pf.cpuProfile, "cpuprofile", "", "write CPU profile to file")
+	f.StringVar(&pf.memProfile, "memprofile", "", "write memory profile to file")
+	f.StringVar(&pf.traceProfile, "trace", "", "write execution trace to file")
+	f.BoolVar(&pf.timings, "timings", false, "log timing information for major steps")
+}
+
+func (pf *profileFlags) start() (func(), error) {
+	var cpuFile *os.File
+	var traceFile *os.File
+
+	if pf.cpuProfile != "" {
+		f, err := os.Create(pf.cpuProfile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create CPU profile %q: %v", pf.cpuProfile, err)
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("failed to start CPU profile: %v", err)
+		}
+		cpuFile = f
+	}
+
+	if pf.traceProfile != "" {
+		f, err := os.Create(pf.traceProfile)
+		if err != nil {
+			if cpuFile != nil {
+				pprof.StopCPUProfile()
+				cpuFile.Close()
+			}
+			return nil, fmt.Errorf("failed to create trace profile %q: %v", pf.traceProfile, err)
+		}
+		if err := trace.Start(f); err != nil {
+			f.Close()
+			if cpuFile != nil {
+				pprof.StopCPUProfile()
+				cpuFile.Close()
+			}
+			return nil, fmt.Errorf("failed to start trace: %v", err)
+		}
+		traceFile = f
+	}
+
+	stop := func() {
+		if traceFile != nil {
+			trace.Stop()
+			traceFile.Close()
+		}
+		if cpuFile != nil {
+			pprof.StopCPUProfile()
+			cpuFile.Close()
+		}
+		if pf.memProfile != "" {
+			f, err := os.Create(pf.memProfile)
+			if err != nil {
+				log.Printf("failed to create memory profile %q: %v", pf.memProfile, err)
+				return
+			}
+			runtime.GC()
+			if err := pprof.WriteHeapProfile(f); err != nil {
+				log.Printf("failed to write memory profile: %v", err)
+			}
+			f.Close()
+		}
+	}
+	return stop, nil
+}
+
+func logTiming(enabled bool, label string, start time.Time) {
+	if enabled {
+		log.Printf("timing: %s=%s", label, time.Since(start))
+	}
+}
+
+func withTiming(ctx context.Context, enabled bool) context.Context {
+	if !enabled {
+		return ctx
+	}
+	return wire.WithTiming(ctx, func(label string, dur time.Duration) {
+		log.Printf("timing: %s=%s", label, dur)
+	})
 }
 
 // newGenerateOptions returns an initialized wire.GenerateOptions, possibly
@@ -101,6 +213,7 @@ type genCmd struct {
 	headerFile     string
 	prefixFileName string
 	tags           string
+	profile        profileFlags
 }
 
 func (*genCmd) Name() string { return "gen" }
@@ -119,9 +232,19 @@ func (cmd *genCmd) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&cmd.headerFile, "header_file", "", "path to file to insert as a header in wire_gen.go")
 	f.StringVar(&cmd.prefixFileName, "output_file_prefix", "", "string to prepend to output file names.")
 	f.StringVar(&cmd.tags, "tags", "", "append build tags to the default wirebuild")
+	cmd.profile.addFlags(f)
 }
 
 func (cmd *genCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
+	stop, err := cmd.profile.start()
+	if err != nil {
+		log.Println(err)
+		return subcommands.ExitFailure
+	}
+	defer stop()
+	totalStart := time.Now()
+	ctx = withTiming(ctx, cmd.profile.timings)
+
 	wd, err := os.Getwd()
 	if err != nil {
 		log.Println("failed to get working directory: ", err)
@@ -136,16 +259,20 @@ func (cmd *genCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interfa
 	opts.PrefixOutputFile = cmd.prefixFileName
 	opts.Tags = cmd.tags
 
+	genStart := time.Now()
 	outs, errs := wire.Generate(ctx, wd, os.Environ(), packages(f), opts)
+	logTiming(cmd.profile.timings, "wire.Generate", genStart)
 	if len(errs) > 0 {
 		logErrors(errs)
 		log.Println("generate failed")
 		return subcommands.ExitFailure
 	}
 	if len(outs) == 0 {
+		logTiming(cmd.profile.timings, "total", totalStart)
 		return subcommands.ExitSuccess
 	}
 	success := true
+	writeStart := time.Now()
 	for _, out := range outs {
 		if len(out.Errs) > 0 {
 			logErrors(out.Errs)
@@ -167,12 +294,96 @@ func (cmd *genCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interfa
 		log.Println("at least one generate failure")
 		return subcommands.ExitFailure
 	}
+	logTiming(cmd.profile.timings, "writes", writeStart)
+	logTiming(cmd.profile.timings, "total", totalStart)
 	return subcommands.ExitSuccess
 }
 
 type diffCmd struct {
 	headerFile string
 	tags       string
+	profile    profileFlags
+}
+
+type cacheCmd struct {
+	clear bool
+}
+
+func (*cacheCmd) Name() string { return "cache" }
+func (*cacheCmd) Synopsis() string {
+	return "inspect or clear the wire cache"
+}
+func (*cacheCmd) Usage() string {
+	return `cache [-clear]
+
+  By default, prints the cache directory. With -clear, removes all cache files.
+`
+}
+func (cmd *cacheCmd) SetFlags(f *flag.FlagSet) {
+	f.BoolVar(&cmd.clear, "clear", false, "remove all cached data")
+}
+func (cmd *cacheCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
+	if cmd.clear {
+		if err := wire.ClearCache(); err != nil {
+			log.Printf("failed to clear cache: %v\n", err)
+			return subcommands.ExitFailure
+		}
+		log.Printf("cleared cache at %s\n", wire.CacheDir())
+		return subcommands.ExitSuccess
+	}
+	fmt.Println(wire.CacheDir())
+	return subcommands.ExitSuccess
+}
+
+type serveCmd struct {
+	headerFile     string
+	prefixFileName string
+	tags           string
+	interval       time.Duration
+	timings        bool
+}
+
+func (*serveCmd) Name() string { return "serve" }
+func (*serveCmd) Synopsis() string {
+	return "watch for changes and regenerate wire output"
+}
+func (*serveCmd) Usage() string {
+	return `serve [packages]
+
+  Serve watches for Go file changes and regenerates wire output when changes
+  are detected. It exits on error or interrupt.
+`
+}
+func (cmd *serveCmd) SetFlags(f *flag.FlagSet) {
+	f.StringVar(&cmd.headerFile, "header_file", "", "path to file to insert as a header in wire_gen.go")
+	f.StringVar(&cmd.prefixFileName, "output_file_prefix", "", "string to prepend to output file names.")
+	f.StringVar(&cmd.tags, "tags", "", "append build tags to the default wirebuild")
+	f.DurationVar(&cmd.interval, "interval", 250*time.Millisecond, "poll interval for filesystem changes")
+	f.BoolVar(&cmd.timings, "timings", false, "log timing information for major steps")
+}
+func (cmd *serveCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
+	wd, err := os.Getwd()
+	if err != nil {
+		log.Println("failed to get working directory: ", err)
+		return subcommands.ExitFailure
+	}
+	opts, err := newGenerateOptions(cmd.headerFile)
+	if err != nil {
+		log.Println(err)
+		return subcommands.ExitFailure
+	}
+	opts.PrefixOutputFile = cmd.prefixFileName
+	opts.Tags = cmd.tags
+
+	ctx = withTiming(ctx, cmd.timings)
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	if err := wire.Serve(ctx, wd, os.Environ(), packages(f), opts, cmd.interval); err != nil && err != context.Canceled {
+		log.Printf("serve failed: %v\n", err)
+		return subcommands.ExitFailure
+	}
+	return subcommands.ExitSuccess
 }
 
 func (*diffCmd) Name() string { return "diff" }
@@ -194,12 +405,22 @@ func (*diffCmd) Usage() string {
 func (cmd *diffCmd) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&cmd.headerFile, "header_file", "", "path to file to insert as a header in wire_gen.go")
 	f.StringVar(&cmd.tags, "tags", "", "append build tags to the default wirebuild")
+	cmd.profile.addFlags(f)
 }
 func (cmd *diffCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
 	const (
 		errReturn  = subcommands.ExitStatus(2)
 		diffReturn = subcommands.ExitStatus(1)
 	)
+	stop, err := cmd.profile.start()
+	if err != nil {
+		log.Println(err)
+		return errReturn
+	}
+	defer stop()
+	totalStart := time.Now()
+	ctx = withTiming(ctx, cmd.profile.timings)
+
 	wd, err := os.Getwd()
 	if err != nil {
 		log.Println("failed to get working directory: ", err)
@@ -213,17 +434,21 @@ func (cmd *diffCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interf
 
 	opts.Tags = cmd.tags
 
+	genStart := time.Now()
 	outs, errs := wire.Generate(ctx, wd, os.Environ(), packages(f), opts)
+	logTiming(cmd.profile.timings, "wire.Generate", genStart)
 	if len(errs) > 0 {
 		logErrors(errs)
 		log.Println("generate failed")
 		return errReturn
 	}
 	if len(outs) == 0 {
+		logTiming(cmd.profile.timings, "total", totalStart)
 		return subcommands.ExitSuccess
 	}
 	success := true
 	hadDiff := false
+	diffStart := time.Now()
 	for _, out := range outs {
 		if len(out.Errs) > 0 {
 			logErrors(out.Errs)
@@ -254,6 +479,8 @@ func (cmd *diffCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interf
 		log.Println("at least one generate failure")
 		return errReturn
 	}
+	logTiming(cmd.profile.timings, "diffs", diffStart)
+	logTiming(cmd.profile.timings, "total", totalStart)
 	if hadDiff {
 		return diffReturn
 	}
@@ -261,7 +488,8 @@ func (cmd *diffCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interf
 }
 
 type showCmd struct {
-	tags string
+	tags    string
+	profile profileFlags
 }
 
 func (*showCmd) Name() string { return "show" }
@@ -281,14 +509,26 @@ func (*showCmd) Usage() string {
 }
 func (cmd *showCmd) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&cmd.tags, "tags", "", "append build tags to the default wirebuild")
+	cmd.profile.addFlags(f)
 }
 func (cmd *showCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
+	stop, err := cmd.profile.start()
+	if err != nil {
+		log.Println(err)
+		return subcommands.ExitFailure
+	}
+	defer stop()
+	totalStart := time.Now()
+	ctx = withTiming(ctx, cmd.profile.timings)
+
 	wd, err := os.Getwd()
 	if err != nil {
 		log.Println("failed to get working directory: ", err)
 		return subcommands.ExitFailure
 	}
+	loadStart := time.Now()
 	info, errs := wire.Load(ctx, wd, os.Environ(), cmd.tags, packages(f))
+	logTiming(cmd.profile.timings, "wire.Load", loadStart)
 	if info != nil {
 		keys := make([]wire.ProviderSetID, 0, len(info.Sets))
 		for k := range info.Sets {
@@ -349,11 +589,13 @@ func (cmd *showCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interf
 		log.Println("error loading packages")
 		return subcommands.ExitFailure
 	}
+	logTiming(cmd.profile.timings, "total", totalStart)
 	return subcommands.ExitSuccess
 }
 
 type checkCmd struct {
-	tags string
+	tags    string
+	profile profileFlags
 }
 
 func (*checkCmd) Name() string { return "check" }
@@ -371,19 +613,32 @@ func (*checkCmd) Usage() string {
 }
 func (cmd *checkCmd) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&cmd.tags, "tags", "", "append build tags to the default wirebuild")
+	cmd.profile.addFlags(f)
 }
 func (cmd *checkCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
+	stop, err := cmd.profile.start()
+	if err != nil {
+		log.Println(err)
+		return subcommands.ExitFailure
+	}
+	defer stop()
+	totalStart := time.Now()
+	ctx = withTiming(ctx, cmd.profile.timings)
+
 	wd, err := os.Getwd()
 	if err != nil {
 		log.Println("failed to get working directory: ", err)
 		return subcommands.ExitFailure
 	}
+	loadStart := time.Now()
 	_, errs := wire.Load(ctx, wd, os.Environ(), cmd.tags, packages(f))
+	logTiming(cmd.profile.timings, "wire.Load", loadStart)
 	if len(errs) > 0 {
 		logErrors(errs)
 		log.Println("error loading packages")
 		return subcommands.ExitFailure
 	}
+	logTiming(cmd.profile.timings, "total", totalStart)
 	return subcommands.ExitSuccess
 }
 

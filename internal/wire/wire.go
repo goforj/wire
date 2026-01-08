@@ -19,6 +19,8 @@ package wire
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -26,11 +28,14 @@ import (
 	"go/printer"
 	"go/token"
 	"go/types"
+	"io/fs"
 	"io/ioutil"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -84,41 +89,629 @@ func Generate(ctx context.Context, wd string, env []string, patterns []string, o
 	if opts == nil {
 		opts = &GenerateOptions{}
 	}
-	pkgs, errs := load(ctx, wd, env, opts.Tags, patterns)
+	if cached, ok := readManifestResults(wd, env, patterns, opts); ok {
+		return cached, nil
+	}
+	loadStart := time.Now()
+	pkgs, loader, errs := load(ctx, wd, env, opts.Tags, patterns)
+	logTiming(ctx, "generate.load", loadStart)
 	if len(errs) > 0 {
 		return nil, errs
 	}
 	generated := make([]GenerateResult, len(pkgs))
 	for i, pkg := range pkgs {
-		generated[i].PkgPath = pkg.PkgPath
-		outDir, err := detectOutputDir(pkg.GoFiles)
-		if err != nil {
-			generated[i].Errs = append(generated[i].Errs, err)
-			continue
-		}
-		generated[i].OutputPath = filepath.Join(outDir, opts.PrefixOutputFile+"wire_gen.go")
-		g := newGen(pkg)
-		injectorFiles, errs := generateInjectors(g, pkg)
-		if len(errs) > 0 {
-			generated[i].Errs = errs
-			continue
-		}
-		copyNonInjectorDecls(g, injectorFiles, pkg.TypesInfo)
-		goSrc := g.frame(opts.Tags)
-		if len(opts.Header) > 0 {
-			goSrc = append(opts.Header, goSrc...)
-		}
-		fmtSrc, err := format.Source(goSrc)
-		if err != nil {
-			// This is likely a bug from a poorly generated source file.
-			// Add an error but also the unformatted source.
-			generated[i].Errs = append(generated[i].Errs, err)
-		} else {
-			goSrc = fmtSrc
-		}
-		generated[i].Content = goSrc
+		generated[i] = generateForPackage(ctx, pkg, loader, opts)
+	}
+	if allGeneratedOK(generated) {
+		writeManifest(wd, env, patterns, opts, pkgs)
 	}
 	return generated, nil
+}
+
+func generateForPackage(ctx context.Context, pkg *packages.Package, loader *lazyLoader, opts *GenerateOptions) GenerateResult {
+	if opts == nil {
+		opts = &GenerateOptions{}
+	}
+	pkgStart := time.Now()
+	res := GenerateResult{
+		PkgPath: pkg.PkgPath,
+	}
+	dirStart := time.Now()
+	outDir, err := detectOutputDir(pkg.GoFiles)
+	logTiming(ctx, "generate.package."+pkg.PkgPath+".output_dir", dirStart)
+	if err != nil {
+		res.Errs = append(res.Errs, err)
+		return res
+	}
+	res.OutputPath = filepath.Join(outDir, opts.PrefixOutputFile+"wire_gen.go")
+	cacheKey, err := cacheKeyForPackage(pkg, opts)
+	if err != nil {
+		res.Errs = append(res.Errs, err)
+		return res
+	}
+	if cacheKey != "" {
+		cacheHitStart := time.Now()
+		if cached, ok := readCache(cacheKey); ok {
+			res.Content = cached
+			logTiming(ctx, "generate.package."+pkg.PkgPath+".cache_hit", cacheHitStart)
+			logTiming(ctx, "generate.package."+pkg.PkgPath+".total", pkgStart)
+			return res
+		}
+	}
+	oc := newObjectCache([]*packages.Package{pkg}, loader)
+	if loaded, errs := oc.ensurePackage(pkg.PkgPath); len(errs) > 0 {
+		res.Errs = append(res.Errs, errs...)
+		return res
+	} else if loaded != nil {
+		pkg = loaded
+	}
+	g := newGen(pkg)
+	injectorStart := time.Now()
+	injectorFiles, errs := generateInjectors(oc, g, pkg)
+	logTiming(ctx, "generate.package."+pkg.PkgPath+".injectors", injectorStart)
+	if len(errs) > 0 {
+		res.Errs = errs
+		return res
+	}
+	copyStart := time.Now()
+	copyNonInjectorDecls(g, injectorFiles, pkg.TypesInfo)
+	logTiming(ctx, "generate.package."+pkg.PkgPath+".copy_non_injectors", copyStart)
+	frameStart := time.Now()
+	goSrc := g.frame(opts.Tags)
+	logTiming(ctx, "generate.package."+pkg.PkgPath+".frame", frameStart)
+	if len(opts.Header) > 0 {
+		goSrc = append(opts.Header, goSrc...)
+	}
+	formatStart := time.Now()
+	fmtSrc, err := format.Source(goSrc)
+	logTiming(ctx, "generate.package."+pkg.PkgPath+".format", formatStart)
+	if err != nil {
+		// This is likely a bug from a poorly generated source file.
+		// Add an error but also the unformatted source.
+		res.Errs = append(res.Errs, err)
+	} else {
+		goSrc = fmtSrc
+	}
+	res.Content = goSrc
+	if cacheKey != "" && len(res.Errs) == 0 {
+		writeCache(cacheKey, res.Content)
+	}
+	logTiming(ctx, "generate.package."+pkg.PkgPath+".total", pkgStart)
+	return res
+}
+
+const cacheVersion = "wire-cache-v1"
+
+func cacheKeyForPackage(pkg *packages.Package, opts *GenerateOptions) (string, error) {
+	files := packageFiles(pkg)
+	if len(files) == 0 {
+		return "", nil
+	}
+	sort.Strings(files)
+	metaKey := cacheMetaKey(pkg, opts)
+	if meta, ok := readCacheMeta(metaKey); ok {
+		if cacheMetaMatches(meta, pkg, opts, files) {
+			return meta.ContentHash, nil
+		}
+	}
+	contentHash, err := contentHashForFiles(pkg, opts, files)
+	if err != nil {
+		return "", err
+	}
+	metaFiles, err := buildCacheFiles(files)
+	if err != nil {
+		return "", err
+	}
+	meta := &cacheMeta{
+		Version:     cacheVersion,
+		PkgPath:     pkg.PkgPath,
+		Tags:        opts.Tags,
+		Prefix:      opts.PrefixOutputFile,
+		HeaderHash:  headerHash(opts.Header),
+		Files:       metaFiles,
+		ContentHash: contentHash,
+	}
+	writeCacheMeta(metaKey, meta)
+	return contentHash, nil
+}
+
+func packageFiles(root *packages.Package) []string {
+	seen := make(map[string]struct{})
+	var files []string
+	stack := []*packages.Package{root}
+	for len(stack) > 0 {
+		p := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if p == nil {
+			continue
+		}
+		if _, ok := seen[p.PkgPath]; ok {
+			continue
+		}
+		seen[p.PkgPath] = struct{}{}
+		if len(p.CompiledGoFiles) > 0 {
+			files = append(files, p.CompiledGoFiles...)
+		} else if len(p.GoFiles) > 0 {
+			files = append(files, p.GoFiles...)
+		}
+		for _, imp := range p.Imports {
+			stack = append(stack, imp)
+		}
+	}
+	return files
+}
+
+func cacheDir() string {
+	return filepath.Join(os.TempDir(), "wire-cache")
+}
+
+// CacheDir returns the directory used for Wire's cache.
+func CacheDir() string {
+	return cacheDir()
+}
+
+// ClearCache removes all cached data.
+func ClearCache() error {
+	return os.RemoveAll(cacheDir())
+}
+
+func cachePath(key string) string {
+	return filepath.Join(cacheDir(), key+".bin")
+}
+
+func readCache(key string) ([]byte, bool) {
+	data, err := os.ReadFile(cachePath(key))
+	if err != nil {
+		return nil, false
+	}
+	return data, true
+}
+
+func writeCache(key string, content []byte) {
+	dir := cacheDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return
+	}
+	path := cachePath(key)
+	tmp, err := os.CreateTemp(dir, key+".tmp-")
+	if err != nil {
+		return
+	}
+	_, writeErr := tmp.Write(content)
+	closeErr := tmp.Close()
+	if writeErr != nil || closeErr != nil {
+		os.Remove(tmp.Name())
+		return
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			os.Remove(tmp.Name())
+			return
+		}
+		os.Remove(tmp.Name())
+	}
+}
+
+type cacheManifest struct {
+	Version    string            `json:"version"`
+	WD         string            `json:"wd"`
+	Tags       string            `json:"tags"`
+	Prefix     string            `json:"prefix"`
+	HeaderHash string            `json:"header_hash"`
+	EnvHash    string            `json:"env_hash"`
+	Patterns   []string          `json:"patterns"`
+	Packages   []manifestPackage `json:"packages"`
+}
+
+type manifestPackage struct {
+	PkgPath     string      `json:"pkg_path"`
+	OutputPath  string      `json:"output_path"`
+	Files       []cacheFile `json:"files"`
+	ContentHash string      `json:"content_hash"`
+}
+
+func readManifestResults(wd string, env []string, patterns []string, opts *GenerateOptions) ([]GenerateResult, bool) {
+	key := manifestKey(wd, env, patterns, opts)
+	manifest, ok := readManifest(key)
+	if !ok {
+		return nil, false
+	}
+	if !manifestValid(manifest) {
+		return nil, false
+	}
+	results := make([]GenerateResult, 0, len(manifest.Packages))
+	for _, pkg := range manifest.Packages {
+		content, ok := readCache(pkg.ContentHash)
+		if !ok {
+			return nil, false
+		}
+		results = append(results, GenerateResult{
+			PkgPath:    pkg.PkgPath,
+			OutputPath: pkg.OutputPath,
+			Content:    content,
+		})
+	}
+	return results, true
+}
+
+func writeManifest(wd string, env []string, patterns []string, opts *GenerateOptions, pkgs []*packages.Package) {
+	if len(pkgs) == 0 {
+		return
+	}
+	key := manifestKey(wd, env, patterns, opts)
+	manifest := &cacheManifest{
+		Version:    cacheVersion,
+		WD:         wd,
+		Tags:       opts.Tags,
+		Prefix:     opts.PrefixOutputFile,
+		HeaderHash: headerHash(opts.Header),
+		EnvHash:    envHash(env),
+		Patterns:   sortedStrings(patterns),
+	}
+	for _, pkg := range pkgs {
+		if pkg == nil {
+			continue
+		}
+		files := packageFiles(pkg)
+		if len(files) == 0 {
+			continue
+		}
+		sort.Strings(files)
+		contentHash, err := cacheKeyForPackage(pkg, opts)
+		if err != nil || contentHash == "" {
+			continue
+		}
+		outDir, err := detectOutputDir(pkg.GoFiles)
+		if err != nil {
+			continue
+		}
+		outputPath := filepath.Join(outDir, opts.PrefixOutputFile+"wire_gen.go")
+		metaFiles, err := buildCacheFiles(files)
+		if err != nil {
+			continue
+		}
+		manifest.Packages = append(manifest.Packages, manifestPackage{
+			PkgPath:     pkg.PkgPath,
+			OutputPath:  outputPath,
+			Files:       metaFiles,
+			ContentHash: contentHash,
+		})
+	}
+	writeManifestFile(key, manifest)
+}
+
+func manifestKey(wd string, env []string, patterns []string, opts *GenerateOptions) string {
+	h := sha256.New()
+	h.Write([]byte(cacheVersion))
+	h.Write([]byte{0})
+	h.Write([]byte(filepath.Clean(wd)))
+	h.Write([]byte{0})
+	h.Write([]byte(envHash(env)))
+	h.Write([]byte{0})
+	h.Write([]byte(opts.Tags))
+	h.Write([]byte{0})
+	h.Write([]byte(opts.PrefixOutputFile))
+	h.Write([]byte{0})
+	h.Write([]byte(headerHash(opts.Header)))
+	h.Write([]byte{0})
+	for _, p := range sortedStrings(patterns) {
+		h.Write([]byte(p))
+		h.Write([]byte{0})
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func manifestKeyFromManifest(manifest *cacheManifest) string {
+	if manifest == nil {
+		return ""
+	}
+	h := sha256.New()
+	h.Write([]byte(cacheVersion))
+	h.Write([]byte{0})
+	h.Write([]byte(filepath.Clean(manifest.WD)))
+	h.Write([]byte{0})
+	h.Write([]byte(manifest.EnvHash))
+	h.Write([]byte{0})
+	h.Write([]byte(manifest.Tags))
+	h.Write([]byte{0})
+	h.Write([]byte(manifest.Prefix))
+	h.Write([]byte{0})
+	h.Write([]byte(manifest.HeaderHash))
+	h.Write([]byte{0})
+	for _, p := range sortedStrings(manifest.Patterns) {
+		h.Write([]byte(p))
+		h.Write([]byte{0})
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func readManifest(key string) (*cacheManifest, bool) {
+	data, err := os.ReadFile(cacheManifestPath(key))
+	if err != nil {
+		return nil, false
+	}
+	var manifest cacheManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return nil, false
+	}
+	return &manifest, true
+}
+
+func writeManifestFile(key string, manifest *cacheManifest) {
+	dir := cacheDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		return
+	}
+	tmp, err := os.CreateTemp(dir, key+".manifest-")
+	if err != nil {
+		return
+	}
+	_, writeErr := tmp.Write(data)
+	closeErr := tmp.Close()
+	if writeErr != nil || closeErr != nil {
+		os.Remove(tmp.Name())
+		return
+	}
+	path := cacheManifestPath(key)
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		os.Remove(tmp.Name())
+	}
+}
+
+func cacheManifestPath(key string) string {
+	return filepath.Join(cacheDir(), key+".manifest.json")
+}
+
+func manifestValid(manifest *cacheManifest) bool {
+	if manifest == nil || manifest.Version != cacheVersion {
+		return false
+	}
+	if manifest.EnvHash == "" || len(manifest.Packages) == 0 {
+		return false
+	}
+	for i := range manifest.Packages {
+		pkg := manifest.Packages[i]
+		if pkg.ContentHash == "" {
+			return false
+		}
+		current, err := buildCacheFilesFromMeta(pkg.Files)
+		if err != nil {
+			return false
+		}
+		if len(current) != len(pkg.Files) {
+			return false
+		}
+		for j := range pkg.Files {
+			if pkg.Files[j] != current[j] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func buildCacheFilesFromMeta(files []cacheFile) ([]cacheFile, error) {
+	out := make([]cacheFile, 0, len(files))
+	for _, file := range files {
+		info, err := os.Stat(file.Path)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, cacheFile{
+			Path:    filepath.Clean(file.Path),
+			Size:    info.Size(),
+			ModTime: info.ModTime().UnixNano(),
+		})
+	}
+	return out, nil
+}
+
+func sortedStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := append([]string(nil), values...)
+	sort.Strings(out)
+	return out
+}
+
+func envHash(env []string) string {
+	if len(env) == 0 {
+		return ""
+	}
+	sorted := sortedStrings(env)
+	h := sha256.New()
+	for _, v := range sorted {
+		h.Write([]byte(v))
+		h.Write([]byte{0})
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func allGeneratedOK(results []GenerateResult) bool {
+	if len(results) == 0 {
+		return false
+	}
+	for _, res := range results {
+		if len(res.Errs) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+type cacheFile struct {
+	Path    string `json:"path"`
+	Size    int64  `json:"size"`
+	ModTime int64  `json:"mod_time"`
+}
+
+type cacheMeta struct {
+	Version     string      `json:"version"`
+	PkgPath     string      `json:"pkg_path"`
+	Tags        string      `json:"tags"`
+	Prefix      string      `json:"prefix"`
+	HeaderHash  string      `json:"header_hash"`
+	Files       []cacheFile `json:"files"`
+	ContentHash string      `json:"content_hash"`
+}
+
+func cacheMetaKey(pkg *packages.Package, opts *GenerateOptions) string {
+	h := sha256.New()
+	h.Write([]byte(cacheVersion))
+	h.Write([]byte{0})
+	h.Write([]byte(pkg.PkgPath))
+	h.Write([]byte{0})
+	h.Write([]byte(opts.Tags))
+	h.Write([]byte{0})
+	h.Write([]byte(opts.PrefixOutputFile))
+	h.Write([]byte{0})
+	h.Write([]byte(headerHash(opts.Header)))
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func cacheMetaPath(key string) string {
+	return filepath.Join(cacheDir(), key+".json")
+}
+
+func readCacheMeta(key string) (*cacheMeta, bool) {
+	data, err := os.ReadFile(cacheMetaPath(key))
+	if err != nil {
+		return nil, false
+	}
+	var meta cacheMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, false
+	}
+	return &meta, true
+}
+
+func writeCacheMeta(key string, meta *cacheMeta) {
+	dir := cacheDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return
+	}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return
+	}
+	tmp, err := os.CreateTemp(dir, key+".meta-")
+	if err != nil {
+		return
+	}
+	_, writeErr := tmp.Write(data)
+	closeErr := tmp.Close()
+	if writeErr != nil || closeErr != nil {
+		os.Remove(tmp.Name())
+		return
+	}
+	path := cacheMetaPath(key)
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		os.Remove(tmp.Name())
+	}
+}
+
+func cacheMetaMatches(meta *cacheMeta, pkg *packages.Package, opts *GenerateOptions, files []string) bool {
+	if meta.Version != cacheVersion {
+		return false
+	}
+	if meta.PkgPath != pkg.PkgPath || meta.Tags != opts.Tags || meta.Prefix != opts.PrefixOutputFile {
+		return false
+	}
+	if meta.HeaderHash != headerHash(opts.Header) {
+		return false
+	}
+	if len(meta.Files) != len(files) {
+		return false
+	}
+	current, err := buildCacheFiles(files)
+	if err != nil {
+		return false
+	}
+	for i := range meta.Files {
+		if meta.Files[i] != current[i] {
+			return false
+		}
+	}
+	return meta.ContentHash != ""
+}
+
+func buildCacheFiles(files []string) ([]cacheFile, error) {
+	out := make([]cacheFile, 0, len(files))
+	for _, name := range files {
+		info, err := os.Stat(name)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, cacheFile{
+			Path:    filepath.Clean(name),
+			Size:    info.Size(),
+			ModTime: info.ModTime().UnixNano(),
+		})
+	}
+	return out, nil
+}
+
+func headerHash(header []byte) string {
+	if len(header) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(header)
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func contentHashForFiles(pkg *packages.Package, opts *GenerateOptions, files []string) (string, error) {
+	h := sha256.New()
+	h.Write([]byte(cacheVersion))
+	h.Write([]byte{0})
+	h.Write([]byte(pkg.PkgPath))
+	h.Write([]byte{0})
+	h.Write([]byte(opts.Tags))
+	h.Write([]byte{0})
+	h.Write([]byte(opts.PrefixOutputFile))
+	h.Write([]byte{0})
+	h.Write([]byte(headerHash(opts.Header)))
+	h.Write([]byte{0})
+	for _, name := range files {
+		h.Write([]byte(name))
+		h.Write([]byte{0})
+		data, err := os.ReadFile(name)
+		if err != nil {
+			return "", err
+		}
+		h.Write(data)
+		h.Write([]byte{0})
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+func contentHashForPaths(pkgPath string, opts *GenerateOptions, files []string) (string, error) {
+	h := sha256.New()
+	h.Write([]byte(cacheVersion))
+	h.Write([]byte{0})
+	h.Write([]byte(pkgPath))
+	h.Write([]byte{0})
+	h.Write([]byte(opts.Tags))
+	h.Write([]byte{0})
+	h.Write([]byte(opts.PrefixOutputFile))
+	h.Write([]byte{0})
+	h.Write([]byte(headerHash(opts.Header)))
+	h.Write([]byte{0})
+	for _, name := range files {
+		h.Write([]byte(name))
+		h.Write([]byte{0})
+		data, err := os.ReadFile(name)
+		if err != nil {
+			return "", err
+		}
+		h.Write(data)
+		h.Write([]byte{0})
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
 func detectOutputDir(paths []string) (string, error) {
@@ -135,8 +728,7 @@ func detectOutputDir(paths []string) (string, error) {
 }
 
 // generateInjectors generates the injectors for a given package.
-func generateInjectors(g *gen, pkg *packages.Package) (injectorFiles []*ast.File, _ []error) {
-	oc := newObjectCache([]*packages.Package{pkg})
+func generateInjectors(oc *objectCache, g *gen, pkg *packages.Package) (injectorFiles []*ast.File, _ []error) {
 	injectorFiles = make([]*ast.File, 0, len(pkg.Syntax))
 	ec := new(errorCollector)
 	for _, f := range pkg.Syntax {
