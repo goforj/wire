@@ -46,28 +46,6 @@ For an overview, see the [introductory blog post][].
 [godoc]: https://godoc.org/github.com/goforj/wire
 [travis]: https://travis-ci.com/google/wire
 
-## Installing
-
-Install Wire by running:
-
-```shell
-go install github.com/goforj/wire/cmd/wire@latest
-```
-
-and ensuring that `$GOPATH/bin` is added to your `$PATH`.
-
-## Compatibility with google/wire
-
-Wire remains compatible with codebases that import `github.com/google/wire`.
-The generator always emits a `//go:generate` line pointing at this fork, so
-running `go generate` consistently uses the maintained toolchain. If you want
-`go generate` to keep working with existing `github.com/google/wire` imports,
-add a module replacement:
-
-```shell
-go mod edit -replace=github.com/google/wire=github.com/goforj/wire@latest
-```
-
 ## How Wire Works (in 60 seconds)
 
 Wire is a **compile-time dependency injection** tool. Instead of building a runtime
@@ -86,7 +64,7 @@ func NewDB(cfg Config) (*sql.DB, error) {
 }
 ````
 
-Dependencies are expressed as function parameters — no globals, no hidden state.
+Dependencies are expressed as function parameters - no globals, no hidden state.
 
 ### Injectors
 
@@ -101,7 +79,7 @@ func InitializeApp(cfg Config) (*App, error) {
 }
 ```
 
-The generated output is plain Go — readable, debuggable, and fast.
+The generated output is plain Go - readable, debuggable, and fast.
 
 ## Minimal Example
 
@@ -181,10 +159,10 @@ For detailed guidance, see **Best Practices**.
 
 If you're new to Wire, we recommend reading in this order:
 
-1. **Tutorial** — A guided introduction with a complete working example
-2. **User Guide** — Full reference for providers, injectors, bindings, and advanced patterns
-3. **Best Practices** — Design guidance for large codebases and libraries
-4. **FAQ** — Design rationale and common questions
+1. **Tutorial** - A guided introduction with a complete working example
+2. **User Guide** - Full reference for providers, injectors, bindings, and advanced patterns
+3. **Best Practices** - Design guidance for large codebases and libraries
+4. **FAQ** - Design rationale and common questions
 
 * [Tutorial](./_tutorial/README.md)
 * [User Guide](./docs/guide.md)
@@ -213,4 +191,3 @@ For questions and discussion, use
 This project follows the Go
 [Code of Conduct](./CODE_OF_CONDUCT.md).
 
-```
