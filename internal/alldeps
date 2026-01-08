@@ -1,6 +1,8 @@
+github.com/fsnotify/fsnotify
 github.com/goforj/wire
 github.com/google/subcommands
 github.com/pmezard/go-difflib
 golang.org/x/mod
 golang.org/x/sync
+golang.org/x/sys
 golang.org/x/tools

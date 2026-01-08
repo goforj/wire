@@ -108,7 +108,7 @@ func (cmd *genCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interfa
 			continue
 		}
 		if err := out.Commit(); err == nil {
-			log.Printf("%s: wrote %s\n", out.PkgPath, out.OutputPath)
+			log.Printf("%s: wrote %s (%s)\n", out.PkgPath, out.OutputPath, formatDuration(time.Since(totalStart)))
 		} else {
 			log.Printf("%s: failed to write %s: %v\n", out.PkgPath, out.OutputPath, err)
 			success = false

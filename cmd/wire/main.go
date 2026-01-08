@@ -43,6 +43,7 @@ func main() {
 	subcommands.Register(&cacheCmd{}, "")
 	subcommands.Register(&diffCmd{}, "")
 	subcommands.Register(&genCmd{}, "")
+	subcommands.Register(&watchCmd{}, "")
 	subcommands.Register(&showCmd{}, "")
 	flag.Parse()
 
@@ -65,6 +66,7 @@ func main() {
 		"gen":      true,
 		"serve":    true,
 		"show":     true,
+		"watch":    true,
 	}
 	// Default to running the "gen" command.
 	if args := flag.Args(); len(args) == 0 || !allCmds[args[0]] {

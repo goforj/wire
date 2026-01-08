@@ -142,6 +142,26 @@ wire
 Wire produces `wire_gen.go` containing explicit initialization code with no
 runtime dependency on Wire.
 
+## Running generation manually
+
+Run the default command (alias for `wire gen`) or specify packages:
+
+```sh
+wire
+wire gen ./...
+```
+
+## Watching for changes
+
+Wire includes a native watcher that re-runs generation on Go file changes:
+
+```sh
+wire watch
+wire watch ./...
+```
+
+Detects the package root automatically and uses native filesystem notifications when available (with a polling fallback).
+
 ## Design Guidance
 
 Wire favors explicitness and long-term maintainability:
@@ -188,4 +208,3 @@ For questions and discussion, use
 
 This project follows the Go
 [Code of Conduct](./CODE_OF_CONDUCT.md).
-
