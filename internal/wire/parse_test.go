@@ -1,0 +1,35 @@
+// Copyright 2026 The Wire Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package wire
+
+import "testing"
+
+func TestIsWireImport(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: "github.com/goforj/wire", want: true},
+		{path: "github.com/google/wire", want: true},
+		{path: "example.com/other/wire", want: false},
+		{path: "vendor/github.com/goforj/wire", want: true},
+		{path: "vendor/github.com/google/wire", want: true},
+	}
+	for _, test := range tests {
+		if got := isWireImport(test.path); got != test.want {
+			t.Fatalf("isWireImport(%q)=%v, want %v", test.path, got, test.want)
+		}
+	}
+}

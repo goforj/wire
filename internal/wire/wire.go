@@ -180,7 +180,7 @@ func generateForPackage(ctx context.Context, pkg *packages.Package, loader *lazy
 	return res
 }
 
-const cacheVersion = "wire-cache-v1"
+const cacheVersion = "wire-cache-v2"
 
 func cacheKeyForPackage(pkg *packages.Package, opts *GenerateOptions) (string, error) {
 	files := packageFiles(pkg)
@@ -198,6 +198,12 @@ func cacheKeyForPackage(pkg *packages.Package, opts *GenerateOptions) (string, e
 	if err != nil {
 		return "", err
 	}
+	rootFiles := rootPackageFiles(pkg)
+	sort.Strings(rootFiles)
+	rootHash, err := hashFiles(rootFiles)
+	if err != nil {
+		return "", err
+	}
 	metaFiles, err := buildCacheFiles(files)
 	if err != nil {
 		return "", err
@@ -210,6 +216,7 @@ func cacheKeyForPackage(pkg *packages.Package, opts *GenerateOptions) (string, e
 		HeaderHash:  headerHash(opts.Header),
 		Files:       metaFiles,
 		ContentHash: contentHash,
+		RootHash:    rootHash,
 	}
 	writeCacheMeta(metaKey, meta)
 	return contentHash, nil
@@ -301,6 +308,7 @@ type cacheManifest struct {
 	EnvHash    string            `json:"env_hash"`
 	Patterns   []string          `json:"patterns"`
 	Packages   []manifestPackage `json:"packages"`
+	ExtraFiles []cacheFile       `json:"extra_files"`
 }
 
 type manifestPackage struct {
@@ -308,6 +316,8 @@ type manifestPackage struct {
 	OutputPath  string      `json:"output_path"`
 	Files       []cacheFile `json:"files"`
 	ContentHash string      `json:"content_hash"`
+	RootFiles   []cacheFile `json:"root_files"`
+	RootHash    string      `json:"root_hash"`
 }
 
 func readManifestResults(wd string, env []string, patterns []string, opts *GenerateOptions) ([]GenerateResult, bool) {
@@ -348,6 +358,7 @@ func writeManifest(wd string, env []string, patterns []string, opts *GenerateOpt
 		EnvHash:    envHash(env),
 		Patterns:   sortedStrings(patterns),
 	}
+	manifest.ExtraFiles = extraCacheFiles(wd)
 	for _, pkg := range pkgs {
 		if pkg == nil {
 			continue
@@ -370,11 +381,23 @@ func writeManifest(wd string, env []string, patterns []string, opts *GenerateOpt
 		if err != nil {
 			continue
 		}
+		rootFiles := rootPackageFiles(pkg)
+		sort.Strings(rootFiles)
+		rootMeta, err := buildCacheFiles(rootFiles)
+		if err != nil {
+			continue
+		}
+		rootHash, err := hashFiles(rootFiles)
+		if err != nil {
+			continue
+		}
 		manifest.Packages = append(manifest.Packages, manifestPackage{
 			PkgPath:     pkg.PkgPath,
 			OutputPath:  outputPath,
 			Files:       metaFiles,
 			ContentHash: contentHash,
+			RootFiles:   rootMeta,
+			RootHash:    rootHash,
 		})
 	}
 	writeManifestFile(key, manifest)
@@ -473,9 +496,26 @@ func manifestValid(manifest *cacheManifest) bool {
 	if manifest.EnvHash == "" || len(manifest.Packages) == 0 {
 		return false
 	}
+	if len(manifest.ExtraFiles) > 0 {
+		current, err := buildCacheFilesFromMeta(manifest.ExtraFiles)
+		if err != nil {
+			return false
+		}
+		if len(current) != len(manifest.ExtraFiles) {
+			return false
+		}
+		for i := range manifest.ExtraFiles {
+			if manifest.ExtraFiles[i] != current[i] {
+				return false
+			}
+		}
+	}
 	for i := range manifest.Packages {
 		pkg := manifest.Packages[i]
 		if pkg.ContentHash == "" {
+			return false
+		}
+		if len(pkg.RootFiles) == 0 || pkg.RootHash == "" {
 			return false
 		}
 		current, err := buildCacheFilesFromMeta(pkg.Files)
@@ -489,6 +529,27 @@ func manifestValid(manifest *cacheManifest) bool {
 			if pkg.Files[j] != current[j] {
 				return false
 			}
+		}
+		rootCurrent, err := buildCacheFilesFromMeta(pkg.RootFiles)
+		if err != nil {
+			return false
+		}
+		if len(rootCurrent) != len(pkg.RootFiles) {
+			return false
+		}
+		for j := range pkg.RootFiles {
+			if pkg.RootFiles[j] != rootCurrent[j] {
+				return false
+			}
+		}
+		rootPaths := make([]string, 0, len(pkg.RootFiles))
+		for _, file := range pkg.RootFiles {
+			rootPaths = append(rootPaths, file.Path)
+		}
+		sort.Strings(rootPaths)
+		rootHash, err := hashFiles(rootPaths)
+		if err != nil || rootHash != pkg.RootHash {
+			return false
 		}
 	}
 	return true
@@ -508,6 +569,59 @@ func buildCacheFilesFromMeta(files []cacheFile) ([]cacheFile, error) {
 		})
 	}
 	return out, nil
+}
+
+func extraCacheFiles(wd string) []cacheFile {
+	paths := extraCachePaths(wd)
+	if len(paths) == 0 {
+		return nil
+	}
+	out := make([]cacheFile, 0, len(paths))
+	seen := make(map[string]struct{})
+	for _, path := range paths {
+		path = filepath.Clean(path)
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		seen[path] = struct{}{}
+		out = append(out, cacheFile{
+			Path:    path,
+			Size:    info.Size(),
+			ModTime: info.ModTime().UnixNano(),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Path < out[j].Path
+	})
+	return out
+}
+
+func extraCachePaths(wd string) []string {
+	var paths []string
+	dir := filepath.Clean(wd)
+	seen := make(map[string]struct{})
+	for {
+		for _, name := range []string{"go.work", "go.work.sum", "go.mod", "go.sum"} {
+			full := filepath.Join(dir, name)
+			if _, ok := seen[full]; ok {
+				continue
+			}
+			if _, err := os.Stat(full); err == nil {
+				paths = append(paths, full)
+				seen[full] = struct{}{}
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return paths
 }
 
 func sortedStrings(values []string) []string {
@@ -558,6 +672,7 @@ type cacheMeta struct {
 	HeaderHash  string      `json:"header_hash"`
 	Files       []cacheFile `json:"files"`
 	ContentHash string      `json:"content_hash"`
+	RootHash    string      `json:"root_hash"`
 }
 
 func cacheMetaKey(pkg *packages.Package, opts *GenerateOptions) string {
@@ -637,6 +752,15 @@ func cacheMetaMatches(meta *cacheMeta, pkg *packages.Package, opts *GenerateOpti
 			return false
 		}
 	}
+	rootFiles := rootPackageFiles(pkg)
+	if len(rootFiles) == 0 || meta.RootHash == "" {
+		return false
+	}
+	sort.Strings(rootFiles)
+	rootHash, err := hashFiles(rootFiles)
+	if err != nil || rootHash != meta.RootHash {
+		return false
+	}
 	return meta.ContentHash != ""
 }
 
@@ -701,6 +825,37 @@ func contentHashForPaths(pkgPath string, opts *GenerateOptions, files []string) 
 	h.Write([]byte{0})
 	h.Write([]byte(headerHash(opts.Header)))
 	h.Write([]byte{0})
+	for _, name := range files {
+		h.Write([]byte(name))
+		h.Write([]byte{0})
+		data, err := os.ReadFile(name)
+		if err != nil {
+			return "", err
+		}
+		h.Write(data)
+		h.Write([]byte{0})
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+func rootPackageFiles(pkg *packages.Package) []string {
+	if pkg == nil {
+		return nil
+	}
+	if len(pkg.CompiledGoFiles) > 0 {
+		return append([]string(nil), pkg.CompiledGoFiles...)
+	}
+	if len(pkg.GoFiles) > 0 {
+		return append([]string(nil), pkg.GoFiles...)
+	}
+	return nil
+}
+
+func hashFiles(files []string) (string, error) {
+	if len(files) == 0 {
+		return "", nil
+	}
+	h := sha256.New()
 	for _, name := range files {
 		h.Write([]byte(name))
 		h.Write([]byte{0})
@@ -859,7 +1014,7 @@ func (g *gen) frame(tags string) []byte {
 		tags = fmt.Sprintf(" gen -tags \"%s\"", tags)
 	}
 	buf.WriteString("// Code generated by Wire. DO NOT EDIT.\n\n")
-	buf.WriteString("//go:generate go run -mod=mod github.com/goforj/wire/cmd/wire" + tags + "\n")
+	buf.WriteString("//go:generate go run -mod=mod " + wireGoGeneratePath(g.pkg) + "/cmd/wire" + tags + "\n")
 	buf.WriteString("//+build !wireinject\n\n")
 	buf.WriteString("package ")
 	buf.WriteString(g.pkg.Name)
@@ -897,6 +1052,18 @@ func (g *gen) frame(tags string) []byte {
 	}
 	buf.Write(g.buf.Bytes())
 	return buf.Bytes()
+}
+
+func wireGoGeneratePath(pkg *packages.Package) string {
+	if pkg != nil && pkg.Imports != nil {
+		if _, ok := pkg.Imports["github.com/google/wire"]; ok {
+			return "github.com/google/wire"
+		}
+		if _, ok := pkg.Imports["github.com/goforj/wire"]; ok {
+			return "github.com/goforj/wire"
+		}
+	}
+	return "github.com/goforj/wire"
 }
 
 // inject emits the code for an injector.

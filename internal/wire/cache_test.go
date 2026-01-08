@@ -208,3 +208,178 @@ func TestManifestInvalidation(t *testing.T) {
 		t.Fatal("expected manifest to be invalid after source update")
 	}
 }
+
+func TestManifestInvalidationGoMod(t *testing.T) {
+	repoRoot := mustRepoRoot(t)
+	root := t.TempDir()
+
+	prevTmp := os.Getenv("TMPDIR")
+	if err := os.Setenv("TMPDIR", t.TempDir()); err != nil {
+		t.Fatalf("Setenv TMPDIR failed: %v", err)
+	}
+	t.Cleanup(func() {
+		os.Setenv("TMPDIR", prevTmp)
+	})
+
+	goModPath := filepath.Join(root, "go.mod")
+	writeFile(t, goModPath, strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require github.com/goforj/wire v0.0.0",
+		"replace github.com/goforj/wire => " + repoRoot,
+		"",
+	}, "\n"))
+
+	writeFile(t, filepath.Join(root, "app", "wire.go"), strings.Join([]string{
+		"//go:build wireinject",
+		"// +build wireinject",
+		"",
+		"package app",
+		"",
+		"import (",
+		"\t\"example.com/app/dep\"",
+		"\t\"github.com/goforj/wire\"",
+		")",
+		"",
+		"func Init() string {",
+		"\twire.Build(dep.ProvideMessage)",
+		"\treturn \"\"",
+		"}",
+		"",
+	}, "\n"))
+
+	writeFile(t, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"func ProvideMessage() string {",
+		"\treturn \"hello\"",
+		"}",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "GOWORK=off")
+	ctx := context.Background()
+	opts := &GenerateOptions{}
+
+	if _, errs := Generate(ctx, root, env, []string{"./app"}, opts); len(errs) > 0 {
+		t.Fatalf("Generate errors: %v", errs)
+	}
+
+	key := manifestKey(root, env, []string{"./app"}, opts)
+	manifest, ok := readManifest(key)
+	if !ok {
+		t.Fatal("expected manifest after Generate")
+	}
+	if !manifestValid(manifest) {
+		t.Fatal("expected manifest to be valid")
+	}
+
+	writeFile(t, goModPath, strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require github.com/goforj/wire v0.0.0 // updated",
+		"replace github.com/goforj/wire => " + repoRoot,
+		"",
+	}, "\n"))
+
+	if manifestValid(manifest) {
+		t.Fatal("expected manifest to be invalid after go.mod update")
+	}
+}
+
+func TestManifestInvalidationSameTimestamp(t *testing.T) {
+	repoRoot := mustRepoRoot(t)
+	root := t.TempDir()
+
+	prevTmp := os.Getenv("TMPDIR")
+	if err := os.Setenv("TMPDIR", t.TempDir()); err != nil {
+		t.Fatalf("Setenv TMPDIR failed: %v", err)
+	}
+	t.Cleanup(func() {
+		os.Setenv("TMPDIR", prevTmp)
+	})
+
+	writeFile(t, filepath.Join(root, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require github.com/goforj/wire v0.0.0",
+		"replace github.com/goforj/wire => " + repoRoot,
+		"",
+	}, "\n"))
+
+	wirePath := filepath.Join(root, "app", "wire.go")
+	writeFile(t, wirePath, strings.Join([]string{
+		"//go:build wireinject",
+		"// +build wireinject",
+		"",
+		"package app",
+		"",
+		"import (",
+		"\t\"example.com/app/dep\"",
+		"\t\"github.com/goforj/wire\"",
+		")",
+		"",
+		"func Init() string {",
+		"\twire.Build(dep.ProvideMessage)",
+		"\treturn \"\"",
+		"}",
+		"",
+	}, "\n"))
+
+	writeFile(t, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"func ProvideMessage() string {",
+		"\treturn \"hello\"",
+		"}",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "GOWORK=off")
+	ctx := context.Background()
+	opts := &GenerateOptions{}
+
+	if _, errs := Generate(ctx, root, env, []string{"./app"}, opts); len(errs) > 0 {
+		t.Fatalf("Generate errors: %v", errs)
+	}
+
+	key := manifestKey(root, env, []string{"./app"}, opts)
+	manifest, ok := readManifest(key)
+	if !ok {
+		t.Fatal("expected manifest after Generate")
+	}
+	if !manifestValid(manifest) {
+		t.Fatal("expected manifest to be valid")
+	}
+
+	info, err := os.Stat(wirePath)
+	if err != nil {
+		t.Fatalf("Stat failed: %v", err)
+	}
+	originalMod := info.ModTime()
+
+	original, err := os.ReadFile(wirePath)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	updated := strings.Replace(string(original), "ProvideMessage", "ProvideMassage", 1)
+	if len(updated) != len(original) {
+		t.Fatalf("expected updated content to keep length; got %d vs %d", len(updated), len(original))
+	}
+	if err := os.WriteFile(wirePath, []byte(updated), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+	if err := os.Chtimes(wirePath, originalMod, originalMod); err != nil {
+		t.Fatalf("Chtimes failed: %v", err)
+	}
+
+	if manifestValid(manifest) {
+		t.Fatal("expected manifest to be invalid after same-timestamp content update")
+	}
+}

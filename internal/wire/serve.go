@@ -252,6 +252,7 @@ func serveStateFor(ctx context.Context, wd string, env []string, patterns []stri
 	if err != nil {
 		return nil, err
 	}
+	metaFiles = append(metaFiles, extraCacheFiles(wd)...)
 	watch, err := buildWatchState(metaFiles)
 	if err != nil {
 		return nil, err
@@ -293,6 +294,7 @@ func serveStateFromManifest(ctx context.Context, manifest *cacheManifest, wd str
 			baseFiles[pkg.PkgPath][path] = struct{}{}
 		}
 	}
+	files = append(files, manifest.ExtraFiles...)
 	watch, err := buildWatchState(files)
 	if err != nil {
 		watch = nil

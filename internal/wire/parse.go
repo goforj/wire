@@ -463,9 +463,17 @@ type lazyLoader struct {
 }
 
 func (ll *lazyLoader) load(pkgPath string) ([]*packages.Package, []error) {
+	return ll.loadWithMode(pkgPath, ll.fullMode(), "load.packages.lazy.load")
+}
+
+func (ll *lazyLoader) fullMode() packages.LoadMode {
+	return packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax
+}
+
+func (ll *lazyLoader) loadWithMode(pkgPath string, mode packages.LoadMode, timingLabel string) ([]*packages.Package, []error) {
 	cfg := &packages.Config{
 		Context:    ll.ctx,
-		Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax,
+		Mode:       mode,
 		Dir:        ll.wd,
 		Env:        ll.env,
 		BuildFlags: []string{"-tags=wireinject"},
@@ -477,7 +485,7 @@ func (ll *lazyLoader) load(pkgPath string) ([]*packages.Package, []error) {
 	}
 	loadStart := time.Now()
 	pkgs, err := packages.Load(cfg, "pattern="+pkgPath)
-	logTiming(ll.ctx, "load.packages.lazy.load", loadStart)
+	logTiming(ll.ctx, timingLabel, loadStart)
 	if err != nil {
 		return nil, []error{err}
 	}
@@ -491,7 +499,13 @@ func (ll *lazyLoader) load(pkgPath string) ([]*packages.Package, []error) {
 func (ll *lazyLoader) parseFileFor(pkgPath string) func(*token.FileSet, string, []byte) (*ast.File, error) {
 	primary := ll.baseFiles[pkgPath]
 	return func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
-		file, err := parser.ParseFile(fset, filename, src, parser.ParseComments)
+		mode := parser.SkipObjectResolution
+		if primary != nil {
+			if _, ok := primary[filepath.Clean(filename)]; ok {
+				mode = parser.ParseComments | parser.SkipObjectResolution
+			}
+		}
+		file, err := parser.ParseFile(fset, filename, src, mode)
 		if err != nil {
 			return nil, err
 		}
@@ -1308,7 +1322,12 @@ func isWireImport(path string) bool {
 	if i := strings.LastIndex(path, vendorPart); i != -1 && (i == 0 || path[i-1] == '/') {
 		path = path[i+len(vendorPart):]
 	}
-	return path == "github.com/goforj/wire"
+	switch path {
+	case "github.com/goforj/wire", "github.com/google/wire":
+		return true
+	default:
+		return false
+	}
 }
 
 func isProviderSetType(t types.Type) bool {
