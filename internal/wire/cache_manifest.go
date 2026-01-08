@@ -16,9 +16,7 @@ package wire
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 
@@ -47,6 +45,8 @@ type manifestPackage struct {
 	RootFiles   []cacheFile `json:"root_files"`
 	RootHash    string      `json:"root_hash"`
 }
+
+var extraCachePathsFunc = extraCachePaths
 
 // readManifestResults loads cached generation results if still valid.
 func readManifestResults(wd string, env []string, patterns []string, opts *GenerateOptions) ([]GenerateResult, bool) {
@@ -98,26 +98,26 @@ func writeManifest(wd string, env []string, patterns []string, opts *GenerateOpt
 			continue
 		}
 		sort.Strings(files)
-		contentHash, err := cacheKeyForPackage(pkg, opts)
+		contentHash, err := cacheKeyForPackageFunc(pkg, opts)
 		if err != nil || contentHash == "" {
 			continue
 		}
-		outDir, err := detectOutputDir(pkg.GoFiles)
+		outDir, err := detectOutputDirFunc(pkg.GoFiles)
 		if err != nil {
 			continue
 		}
 		outputPath := filepath.Join(outDir, opts.PrefixOutputFile+"wire_gen.go")
-		metaFiles, err := buildCacheFiles(files)
+		metaFiles, err := buildCacheFilesFunc(files)
 		if err != nil {
 			continue
 		}
-		rootFiles := rootPackageFiles(pkg)
+		rootFiles := rootPackageFilesFunc(pkg)
 		sort.Strings(rootFiles)
-		rootMeta, err := buildCacheFiles(rootFiles)
+		rootMeta, err := buildCacheFilesFunc(rootFiles)
 		if err != nil {
 			continue
 		}
-		rootHash, err := hashFiles(rootFiles)
+		rootHash, err := hashFilesFunc(rootFiles)
 		if err != nil {
 			continue
 		}
@@ -182,12 +182,12 @@ func manifestKeyFromManifest(manifest *cacheManifest) string {
 
 // readManifest loads the cached manifest by key.
 func readManifest(key string) (*cacheManifest, bool) {
-	data, err := os.ReadFile(cacheManifestPath(key))
+	data, err := osReadFile(cacheManifestPath(key))
 	if err != nil {
 		return nil, false
 	}
 	var manifest cacheManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
+	if err := jsonUnmarshal(data, &manifest); err != nil {
 		return nil, false
 	}
 	return &manifest, true
@@ -196,26 +196,26 @@ func readManifest(key string) (*cacheManifest, bool) {
 // writeManifestFile writes the manifest to disk.
 func writeManifestFile(key string, manifest *cacheManifest) {
 	dir := cacheDir()
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := osMkdirAll(dir, 0755); err != nil {
 		return
 	}
-	data, err := json.Marshal(manifest)
+	data, err := jsonMarshal(manifest)
 	if err != nil {
 		return
 	}
-	tmp, err := os.CreateTemp(dir, key+".manifest-")
+	tmp, err := osCreateTemp(dir, key+".manifest-")
 	if err != nil {
 		return
 	}
 	_, writeErr := tmp.Write(data)
 	closeErr := tmp.Close()
 	if writeErr != nil || closeErr != nil {
-		os.Remove(tmp.Name())
+		osRemove(tmp.Name())
 		return
 	}
 	path := cacheManifestPath(key)
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		os.Remove(tmp.Name())
+	if err := osRename(tmp.Name(), path); err != nil {
+		osRemove(tmp.Name())
 	}
 }
 
@@ -233,7 +233,7 @@ func manifestValid(manifest *cacheManifest) bool {
 		return false
 	}
 	if len(manifest.ExtraFiles) > 0 {
-		current, err := buildCacheFilesFromMeta(manifest.ExtraFiles)
+		current, err := buildCacheFilesFromMetaFunc(manifest.ExtraFiles)
 		if err != nil {
 			return false
 		}
@@ -254,7 +254,7 @@ func manifestValid(manifest *cacheManifest) bool {
 		if len(pkg.RootFiles) == 0 || pkg.RootHash == "" {
 			return false
 		}
-		current, err := buildCacheFilesFromMeta(pkg.Files)
+		current, err := buildCacheFilesFromMetaFunc(pkg.Files)
 		if err != nil {
 			return false
 		}
@@ -266,7 +266,7 @@ func manifestValid(manifest *cacheManifest) bool {
 				return false
 			}
 		}
-		rootCurrent, err := buildCacheFilesFromMeta(pkg.RootFiles)
+		rootCurrent, err := buildCacheFilesFromMetaFunc(pkg.RootFiles)
 		if err != nil {
 			return false
 		}
@@ -295,7 +295,7 @@ func manifestValid(manifest *cacheManifest) bool {
 func buildCacheFilesFromMeta(files []cacheFile) ([]cacheFile, error) {
 	out := make([]cacheFile, 0, len(files))
 	for _, file := range files {
-		info, err := os.Stat(file.Path)
+		info, err := osStat(file.Path)
 		if err != nil {
 			return nil, err
 		}
@@ -310,7 +310,7 @@ func buildCacheFilesFromMeta(files []cacheFile) ([]cacheFile, error) {
 
 // extraCacheFiles returns Go module/workspace files affecting builds.
 func extraCacheFiles(wd string) []cacheFile {
-	paths := extraCachePaths(wd)
+	paths := extraCachePathsFunc(wd)
 	if len(paths) == 0 {
 		return nil
 	}
@@ -321,7 +321,7 @@ func extraCacheFiles(wd string) []cacheFile {
 		if _, ok := seen[path]; ok {
 			continue
 		}
-		info, err := os.Stat(path)
+		info, err := osStat(path)
 		if err != nil {
 			continue
 		}
@@ -346,13 +346,7 @@ func extraCachePaths(wd string) []string {
 	for {
 		for _, name := range []string{"go.work", "go.work.sum", "go.mod", "go.sum"} {
 			full := filepath.Join(dir, name)
-			if _, ok := seen[full]; ok {
-				continue
-			}
-			if _, err := os.Stat(full); err == nil {
-				paths = append(paths, full)
-				seen[full] = struct{}{}
-			}
+			addExtraCachePath(&paths, seen, full)
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -361,6 +355,18 @@ func extraCachePaths(wd string) []string {
 		dir = parent
 	}
 	return paths
+}
+
+// addExtraCachePath appends an existing file if it has not been seen.
+func addExtraCachePath(paths *[]string, seen map[string]struct{}, full string) {
+	if _, ok := seen[full]; ok {
+		return
+	}
+	if _, err := osStat(full); err != nil {
+		return
+	}
+	*paths = append(*paths, full)
+	seen[full] = struct{}{}
 }
 
 // sortedStrings returns a sorted copy of the input slice.

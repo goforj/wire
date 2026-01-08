@@ -16,9 +16,7 @@ package wire
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 
@@ -137,12 +135,12 @@ func cacheMetaPath(key string) string {
 
 // readCacheMeta loads a cached metadata entry if it exists.
 func readCacheMeta(key string) (*cacheMeta, bool) {
-	data, err := os.ReadFile(cacheMetaPath(key))
+	data, err := osReadFile(cacheMetaPath(key))
 	if err != nil {
 		return nil, false
 	}
 	var meta cacheMeta
-	if err := json.Unmarshal(data, &meta); err != nil {
+	if err := jsonUnmarshal(data, &meta); err != nil {
 		return nil, false
 	}
 	return &meta, true
@@ -151,26 +149,26 @@ func readCacheMeta(key string) (*cacheMeta, bool) {
 // writeCacheMeta persists cache metadata to disk.
 func writeCacheMeta(key string, meta *cacheMeta) {
 	dir := cacheDir()
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := osMkdirAll(dir, 0755); err != nil {
 		return
 	}
-	data, err := json.Marshal(meta)
+	data, err := jsonMarshal(meta)
 	if err != nil {
 		return
 	}
-	tmp, err := os.CreateTemp(dir, key+".meta-")
+	tmp, err := osCreateTemp(dir, key+".meta-")
 	if err != nil {
 		return
 	}
 	_, writeErr := tmp.Write(data)
 	closeErr := tmp.Close()
 	if writeErr != nil || closeErr != nil {
-		os.Remove(tmp.Name())
+		osRemove(tmp.Name())
 		return
 	}
 	path := cacheMetaPath(key)
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		os.Remove(tmp.Name())
+	if err := osRename(tmp.Name(), path); err != nil {
+		osRemove(tmp.Name())
 	}
 }
 
@@ -213,7 +211,7 @@ func cacheMetaMatches(meta *cacheMeta, pkg *packages.Package, opts *GenerateOpti
 func buildCacheFiles(files []string) ([]cacheFile, error) {
 	out := make([]cacheFile, 0, len(files))
 	for _, name := range files {
-		info, err := os.Stat(name)
+		info, err := osStat(name)
 		if err != nil {
 			return nil, err
 		}
@@ -256,7 +254,7 @@ func contentHashForPaths(pkgPath string, opts *GenerateOptions, files []string) 
 	for _, name := range files {
 		h.Write([]byte(name))
 		h.Write([]byte{0})
-		data, err := os.ReadFile(name)
+		data, err := osReadFile(name)
 		if err != nil {
 			return "", err
 		}
@@ -289,7 +287,7 @@ func hashFiles(files []string) (string, error) {
 	for _, name := range files {
 		h.Write([]byte(name))
 		h.Write([]byte{0})
-		data, err := os.ReadFile(name)
+		data, err := osReadFile(name)
 		if err != nil {
 			return "", err
 		}

@@ -17,13 +17,12 @@ package wire
 import (
 	"errors"
 	"io/fs"
-	"os"
 	"path/filepath"
 )
 
 // cacheDir returns the base directory for Wire cache files.
 func cacheDir() string {
-	return filepath.Join(os.TempDir(), "wire-cache")
+	return filepath.Join(osTempDir(), "wire-cache")
 }
 
 // CacheDir returns the directory used for Wire's cache.
@@ -33,7 +32,7 @@ func CacheDir() string {
 
 // ClearCache removes all cached data.
 func ClearCache() error {
-	return os.RemoveAll(cacheDir())
+	return osRemoveAll(cacheDir())
 }
 
 // cachePath builds the on-disk path for a cached content hash.
@@ -43,7 +42,7 @@ func cachePath(key string) string {
 
 // readCache reads a cached content blob by key.
 func readCache(key string) ([]byte, bool) {
-	data, err := os.ReadFile(cachePath(key))
+	data, err := osReadFile(cachePath(key))
 	if err != nil {
 		return nil, false
 	}
@@ -53,25 +52,25 @@ func readCache(key string) ([]byte, bool) {
 // writeCache persists a content blob for the provided cache key.
 func writeCache(key string, content []byte) {
 	dir := cacheDir()
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := osMkdirAll(dir, 0755); err != nil {
 		return
 	}
 	path := cachePath(key)
-	tmp, err := os.CreateTemp(dir, key+".tmp-")
+	tmp, err := osCreateTemp(dir, key+".tmp-")
 	if err != nil {
 		return
 	}
 	_, writeErr := tmp.Write(content)
 	closeErr := tmp.Close()
 	if writeErr != nil || closeErr != nil {
-		os.Remove(tmp.Name())
+		osRemove(tmp.Name())
 		return
 	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
+	if err := osRename(tmp.Name(), path); err != nil {
 		if errors.Is(err, fs.ErrExist) {
-			os.Remove(tmp.Name())
+			osRemove(tmp.Name())
 			return
 		}
-		os.Remove(tmp.Name())
+		osRemove(tmp.Name())
 	}
 }
