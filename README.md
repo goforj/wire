@@ -1,7 +1,25 @@
-# Wire: Automated Initialization in Go
+<p align="center">
+  <img src="./docs/assets/logo.png" width="400" alt="goforj/wire logo">
+</p>
 
-[![Build Status](https://github.com/goforj/wire/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/goforj/wire/actions)
-[![godoc](https://godoc.org/github.com/goforj/wire?status.svg)][godoc]
+<p align="center">
+    Compile-time dependency injection for Go - fast, explicit, and reflection-free.
+</p>
+
+<p align="center">
+    <a href="https://pkg.go.dev/github.com/goforj/wire"><img src="https://pkg.go.dev/badge/github.com/goforj/wire.svg" alt="Go Reference"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+    <a href="https://github.com/goforj/wire/actions"><img src="https://github.com/goforj/wire/actions/workflows/test.yml/badge.svg" alt="Go Test"></a>
+    <a href="https://golang.org"><img src="https://img.shields.io/badge/go-1.21+-blue?logo=go" alt="Go version"></a>
+    <img src="https://img.shields.io/github/v/tag/goforj/wire?label=version&sort=semver" alt="Latest tag">
+    <a href="https://codecov.io/gh/goforj/wire" ><img src="https://codecov.io/github/goforj/wire/graph/badge.svg?token=3KFTK96U8C"/></a>
+    <a href="https://goreportcard.com/report/github.com/goforj/wire"><img src="https://goreportcard.com/badge/github.com/goforj/wire" alt="Go Report Card"></a>
+</p>
+
+<p align="center">
+  <code>wire</code> generates plain Go code to wire your application together.
+  No runtime container, no reflection, no hidden magic - just fast, explicit initialization.
+</p>
 
 > [!NOTE]
 > This is a maintained fork of `google/wire`.
