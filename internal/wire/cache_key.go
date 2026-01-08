@@ -26,7 +26,7 @@ import (
 )
 
 // cacheVersion is the schema/version identifier for cache entries.
-const cacheVersion = "wire-cache-v2"
+const cacheVersion = "wire-cache-v3"
 
 // cacheFile captures file metadata used to validate cached content.
 type cacheFile struct {

@@ -275,14 +275,6 @@ func (g *gen) frame(tags string) []byte {
 }
 
 func wireGoGeneratePath(pkg *packages.Package) string {
-	if pkg != nil && pkg.Imports != nil {
-		if _, ok := pkg.Imports["github.com/google/wire"]; ok {
-			return "github.com/google/wire"
-		}
-		if _, ok := pkg.Imports["github.com/goforj/wire"]; ok {
-			return "github.com/goforj/wire"
-		}
-	}
 	return "github.com/goforj/wire"
 }
 

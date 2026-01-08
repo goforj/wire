@@ -31,7 +31,7 @@ func TestWireGoGeneratePath(t *testing.T) {
 			imports: map[string]*packages.Package{
 				"github.com/google/wire": {},
 			},
-			want: "github.com/google/wire",
+			want: "github.com/goforj/wire",
 		},
 		{
 			name: "goforj",

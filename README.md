@@ -52,6 +52,18 @@ go install github.com/goforj/wire/cmd/wire@latest
 
 and ensuring that `$GOPATH/bin` is added to your `$PATH`.
 
+## Compatibility with google/wire
+
+Wire remains compatible with codebases that import `github.com/google/wire`.
+The generator always emits a `//go:generate` line pointing at this fork, so
+running `go generate` consistently uses the maintained toolchain. If you want
+`go generate` to keep working with existing `github.com/google/wire` imports,
+add a module replacement:
+
+```shell
+go mod edit -replace=github.com/google/wire=github.com/goforj/wire@latest
+```
+
 ## Documentation
 
 - [Tutorial][]
