@@ -19,7 +19,9 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"go/ast"
 	"go/build"
+	"go/token"
 	"go/types"
 	"io/ioutil"
 	"os"
@@ -31,6 +33,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/go-cmp/cmp"
+	"golang.org/x/tools/go/packages"
 )
 
 var record = flag.Bool("record", false, "whether to run tests against cloud resources and record the interactions")
@@ -162,6 +165,101 @@ func TestWire(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGenerateResultCommit(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wire_gen.go")
+
+	gen := GenerateResult{OutputPath: path}
+	if err := gen.Commit(); err != nil {
+		t.Fatalf("Commit with empty content failed: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected no file written, got err=%v", err)
+	}
+
+	gen.Content = []byte("package p\n")
+	if err := gen.Commit(); err != nil {
+		t.Fatalf("Commit failed: %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != string(gen.Content) {
+		t.Fatalf("Commit content mismatch, got=%q err=%v", got, err)
+	}
+}
+
+func TestZeroValue(t *testing.T) {
+	t.Parallel()
+
+	pkg := types.NewPackage("example.com/p", "p")
+	named := types.NewNamed(types.NewTypeName(token.NoPos, pkg, "S", nil), types.NewStruct(nil, nil), nil)
+	ptr := types.NewPointer(named)
+	array := types.NewArray(types.Typ[types.Int], 2)
+
+	if got := zeroValue(named, nil); got != "example.com/p.S{}" {
+		t.Fatalf("zeroValue struct=%q", got)
+	}
+	if got := zeroValue(ptr, nil); got != "nil" {
+		t.Fatalf("zeroValue pointer=%q", got)
+	}
+	if got := zeroValue(types.Typ[types.Bool], nil); got != "false" {
+		t.Fatalf("zeroValue bool=%q", got)
+	}
+	if got := zeroValue(types.Typ[types.Int], nil); got != "0" {
+		t.Fatalf("zeroValue int=%q", got)
+	}
+	if got := zeroValue(types.Typ[types.String], nil); got != "\"\"" {
+		t.Fatalf("zeroValue string=%q", got)
+	}
+	if got := zeroValue(array, nil); got != "[2]int{}" {
+		t.Fatalf("zeroValue array=%q", got)
+	}
+
+	assertPanic := func(name string, fn func()) {
+		t.Helper()
+		defer func() {
+			if recover() == nil {
+				t.Fatalf("expected panic for %s", name)
+			}
+		}()
+		fn()
+	}
+	assertPanic("unsupported", func() { zeroValue(types.NewTuple(), nil) })
+	assertPanic("unsafe", func() { zeroValue(types.Typ[types.UnsafePointer], nil) })
+}
+
+func TestGenImportHelpers(t *testing.T) {
+	t.Parallel()
+
+	pkg := &packages.Package{
+		PkgPath: "example.com/p",
+		Name:    "p",
+		Types:   types.NewPackage("example.com/p", "p"),
+	}
+	pkg.Types.Scope().Insert(types.NewVar(token.NoPos, pkg.Types, "scopeVar", types.Typ[types.Int]))
+
+	g := newGen(pkg)
+	g.imports["example.com/imp"] = importInfo{name: "imp"}
+	g.values[ast.NewIdent("value")] = "value"
+
+	if !g.nameInFileScope("imp") {
+		t.Fatal("expected nameInFileScope to see import name")
+	}
+	if !g.nameInFileScope("scopeVar") {
+		t.Fatal("expected nameInFileScope to see package scope name")
+	}
+	if !g.nameInFileScope("value") {
+		t.Fatal("expected nameInFileScope to see value name")
+	}
+
+	if got := g.qualifyImport("p", pkg.PkgPath); got != "" {
+		t.Fatalf("expected local package to return empty qualifier, got=%q", got)
+	}
+	if got := g.qualifyImport("foo", "vendor/example.com/foo"); got == "" {
+		t.Fatal("expected vendored import to be qualified")
 	}
 }
 
