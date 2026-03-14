@@ -471,6 +471,7 @@ type objectCache struct {
 	objects  map[objRef]objCacheEntry
 	hasher   typeutil.Hasher
 	loader   *lazyLoader
+	summary  *summaryProviderResolver
 }
 
 type objRef struct {
@@ -484,6 +485,10 @@ type objCacheEntry struct {
 }
 
 func newObjectCache(pkgs []*packages.Package, loader *lazyLoader) *objectCache {
+	return newObjectCacheWithLoader(pkgs, loader, nil, nil)
+}
+
+func newObjectCacheWithLoader(pkgs []*packages.Package, loader *lazyLoader, _ *localFastPathLoader, summary *summaryProviderResolver) *objectCache {
 	if len(pkgs) == 0 {
 		panic("object cache must have packages to draw from")
 	}
@@ -493,6 +498,7 @@ func newObjectCache(pkgs []*packages.Package, loader *lazyLoader) *objectCache {
 		objects:  make(map[objRef]objCacheEntry),
 		hasher:   typeutil.MakeHasher(),
 		loader:   loader,
+		summary:  summary,
 	}
 	if oc.fset == nil && loader != nil {
 		oc.fset = loader.fset
@@ -557,9 +563,6 @@ func (oc *objectCache) get(obj types.Object) (val interface{}, errs []error) {
 	if ent, cached := oc.objects[ref]; cached {
 		return ent.val, append([]error(nil), ent.errs...)
 	}
-	if _, errs := oc.ensurePackage(ref.importPath); len(errs) > 0 {
-		return nil, errs
-	}
 	defer func() {
 		oc.objects[ref] = objCacheEntry{
 			val:  val,
@@ -568,6 +571,14 @@ func (oc *objectCache) get(obj types.Object) (val interface{}, errs []error) {
 	}()
 	switch obj := obj.(type) {
 	case *types.Var:
+		if isProviderSetType(obj.Type()) && oc.summary != nil {
+			if pset, ok, summaryErrs := oc.summary.Resolve(obj.Pkg().Path(), obj.Name()); ok {
+				return pset, summaryErrs
+			}
+		}
+		if _, errs := oc.ensurePackage(ref.importPath); len(errs) > 0 {
+			return nil, errs
+		}
 		spec := oc.varDecl(obj)
 		if spec == nil || len(spec.Values) == 0 {
 			return nil, []error{fmt.Errorf("%v is not a provider or a provider set", obj)}
@@ -583,6 +594,9 @@ func (oc *objectCache) get(obj types.Object) (val interface{}, errs []error) {
 	case *types.Func:
 		return processFuncProvider(oc.fset, obj)
 	default:
+		if _, errs := oc.ensurePackage(ref.importPath); len(errs) > 0 {
+			return nil, errs
+		}
 		return nil, []error{fmt.Errorf("%v is not a provider or a provider set", obj)}
 	}
 }

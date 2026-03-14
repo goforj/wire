@@ -250,12 +250,8 @@ func buildExternalPackageFiles(wd string, pkgs []*packages.Package) ([]cacheFile
 }
 
 func buildExternalPackageExports(wd string, pkgs []*packages.Package) []externalPackageExport {
-	moduleRoot := findModuleRoot(wd)
 	out := make([]externalPackageExport, 0)
 	for _, pkg := range collectAllPackages(pkgs) {
-		if classifyPackageLocation(moduleRoot, pkg) == "local" {
-			continue
-		}
 		if pkg == nil || pkg.PkgPath == "" || pkg.ExportFile == "" {
 			continue
 		}

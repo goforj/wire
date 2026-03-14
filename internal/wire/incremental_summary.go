@@ -148,6 +148,10 @@ func writeIncrementalPackageSummary(key string, summary *packageSummary) {
 }
 
 func writeIncrementalPackageSummaries(loader *lazyLoader, pkgs []*packages.Package) {
+	writeIncrementalPackageSummariesWithSummary(loader, pkgs, nil, nil)
+}
+
+func writeIncrementalPackageSummariesWithSummary(loader *lazyLoader, pkgs []*packages.Package, summary *summaryProviderResolver, only map[string]struct{}) {
 	if loader == nil || len(pkgs) == 0 {
 		return
 	}
@@ -162,10 +166,15 @@ func writeIncrementalPackageSummaries(loader *lazyLoader, pkgs []*packages.Packa
 	for _, pkg := range all {
 		allPkgs = append(allPkgs, pkg)
 	}
-	oc := newObjectCache(allPkgs, loader)
+	oc := newObjectCacheWithLoader(allPkgs, loader, nil, summary)
 	for _, pkg := range all {
 		if classifyPackageLocation(moduleRoot, pkg) != "local" {
 			continue
+		}
+		if len(only) > 0 {
+			if _, ok := only[pkg.PkgPath]; !ok {
+				continue
+			}
 		}
 		if pkg == nil || pkg.TypesInfo == nil || len(pkg.Syntax) == 0 {
 			continue

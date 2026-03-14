@@ -5,15 +5,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
-	"text/tabwriter"
 	"testing"
 	"time"
 )
 
 const (
 	largeBenchmarkTestPackageCount = 24
-	largeBenchmarkHelperCount  = 12
+	largeBenchmarkHelperCount      = 12
 )
 
 var largeBenchmarkSizes = []int{10, 100, 1000}
@@ -106,36 +106,42 @@ func TestPrintLargeRepoBenchmarkComparisonTable(t *testing.T) {
 		incremental := measureLargeRepoShapeChangeOnce(t, repoRoot, packageCount, true)
 		knownToggle := measureLargeRepoKnownToggleOnce(t, repoRoot, packageCount)
 		rows = append(rows, largeRepoBenchmarkRow{
-			packageCount:      packageCount,
-			coldNormal:        coldNormal,
-			coldIncremental:   coldIncremental,
-			normal:            normal,
-			incremental:       incremental,
-			knownToggle:       knownToggle,
+			packageCount:    packageCount,
+			coldNormal:      coldNormal,
+			coldIncremental: coldIncremental,
+			normal:          normal,
+			incremental:     incremental,
+			knownToggle:     knownToggle,
 		})
 	}
 
-	var out strings.Builder
-	tw := tabwriter.NewWriter(&out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "size\tcold normal\tcold incr\tcold delta\tcold x\tshape normal\tshape incr\tshape delta\tshape x\tknown toggle")
+	table := [][]string{{
+		"repo size",
+		"cold old",
+		"cold new",
+		"cold delta",
+		"shape old",
+		"shape new",
+		"shape delta",
+		"known toggle",
+		"cold speedup",
+		"shape speedup",
+	}}
 	for _, row := range rows {
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%.2fx\t%s\t%s\t%s\t%.2fx\t%s\n",
-			row.packageCount,
+		table = append(table, []string{
+			strconv.Itoa(row.packageCount),
 			formatBenchmarkDuration(row.coldNormal),
 			formatBenchmarkDuration(row.coldIncremental),
 			formatPercentImprovement(row.coldNormal, row.coldIncremental),
-			speedupRatio(row.coldNormal, row.coldIncremental),
 			formatBenchmarkDuration(row.normal),
 			formatBenchmarkDuration(row.incremental),
 			formatPercentImprovement(row.normal, row.incremental),
-			speedupRatio(row.normal, row.incremental),
 			formatBenchmarkDuration(row.knownToggle),
-		)
+			fmt.Sprintf("%.2fx", speedupRatio(row.coldNormal, row.coldIncremental)),
+			fmt.Sprintf("%.2fx", speedupRatio(row.normal, row.incremental)),
+		})
 	}
-	if err := tw.Flush(); err != nil {
-		t.Fatalf("flush benchmark table: %v", err)
-	}
-	fmt.Print(out.String())
+	fmt.Print(renderASCIITable(table))
 }
 
 func TestPrintLargeRepoShapeChangeBreakdownTable(t *testing.T) {
@@ -151,27 +157,35 @@ func TestPrintLargeRepoShapeChangeBreakdownTable(t *testing.T) {
 	})
 
 	repoRoot := benchmarkRepoRoot(t)
-	var out strings.Builder
-	tw := tabwriter.NewWriter(&out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "size\tnormal total\tbase load\tlazy load\tincr total\tfast load\tfast generate\tspeedup")
+	rows := [][]string{{
+		"repo size",
+		"old total",
+		"old base load",
+		"old typed load",
+		"new total",
+		"new local load",
+		"new cached sets",
+		"new injector solve",
+		"new generate",
+		"speedup",
+	}}
 	for _, packageCount := range largeBenchmarkSizes {
 		normal := measureLargeRepoShapeChangeTraceOnce(t, repoRoot, packageCount, false)
 		incremental := measureLargeRepoShapeChangeTraceOnce(t, repoRoot, packageCount, true)
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%.2fx\n",
-			packageCount,
+		rows = append(rows, []string{
+			strconv.Itoa(packageCount),
 			formatBenchmarkDuration(normal.total),
 			formatBenchmarkDuration(normal.label("load.packages.base.load")),
 			formatBenchmarkDuration(normal.label("load.packages.lazy.load")),
 			formatBenchmarkDuration(incremental.total),
 			formatBenchmarkDuration(incremental.label("incremental.local_fastpath.load")),
+			formatBenchmarkDuration(incremental.label("incremental.local_fastpath.summary_resolve")),
+			formatBenchmarkDuration(incremental.label("generate.package.example.com/app/app.injectors")),
 			formatBenchmarkDuration(incremental.label("incremental.local_fastpath.generate")),
-			speedupRatio(normal.total, incremental.total),
-		)
+			fmt.Sprintf("%.2fx", speedupRatio(normal.total, incremental.total)),
+		})
 	}
-	if err := tw.Flush(); err != nil {
-		t.Fatalf("flush breakdown table: %v", err)
-	}
-	fmt.Print(out.String())
+	fmt.Print(renderASCIITable(rows))
 }
 
 func writeIncrementalBenchmarkModule(tb testing.TB, repoRoot string, root string) {
@@ -651,4 +665,45 @@ func writeBenchmarkFile(tb testing.TB, path string, content string) {
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		tb.Fatalf("WriteFile failed: %v", err)
 	}
+}
+
+func renderASCIITable(rows [][]string) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	widths := make([]int, len(rows[0]))
+	for _, row := range rows {
+		for i, cell := range row {
+			if len(cell) > widths[i] {
+				widths[i] = len(cell)
+			}
+		}
+	}
+	var b strings.Builder
+	border := func() {
+		b.WriteByte('+')
+		for _, width := range widths {
+			b.WriteString(strings.Repeat("-", width+2))
+			b.WriteByte('+')
+		}
+		b.WriteByte('\n')
+	}
+	writeRow := func(row []string) {
+		b.WriteByte('|')
+		for i, cell := range row {
+			b.WriteByte(' ')
+			b.WriteString(cell)
+			b.WriteString(strings.Repeat(" ", widths[i]-len(cell)+1))
+			b.WriteByte('|')
+		}
+		b.WriteByte('\n')
+	}
+	border()
+	writeRow(rows[0])
+	border()
+	for _, row := range rows[1:] {
+		writeRow(row)
+	}
+	border()
+	return b.String()
 }

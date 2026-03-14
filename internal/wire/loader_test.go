@@ -794,6 +794,148 @@ func TestGenerateIncrementalShapeChangeMatchesNormalGenerate(t *testing.T) {
 	}
 }
 
+func TestGenerateIncrementalShapeChangeWithUnchangedDependentPackageMatchesNormalGenerate(t *testing.T) {
+	lockCacheHooks(t)
+	state := saveCacheHooks()
+	t.Cleanup(func() { restoreCacheHooks(state) })
+
+	cacheRoot := t.TempDir()
+	osTempDir = func() string { return cacheRoot }
+
+	repoRoot := mustRepoRoot(t)
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require github.com/goforj/wire v0.0.0",
+		"replace github.com/goforj/wire => " + repoRoot,
+		"",
+	}, "\n"))
+
+	writeFile(t, filepath.Join(root, "app", "wire.go"), strings.Join([]string{
+		"//go:build wireinject",
+		"// +build wireinject",
+		"",
+		"package app",
+		"",
+		"import (",
+		"\t\"example.com/app/dep\"",
+		"\t\"example.com/app/router\"",
+		"\t\"github.com/goforj/wire\"",
+		")",
+		"",
+		"func Init() *router.Routes {",
+		"\twire.Build(dep.Set, router.Set)",
+		"\treturn nil",
+		"}",
+		"",
+	}, "\n"))
+
+	writeFile(t, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"type Controller struct { Message string }",
+		"",
+		"func NewMessage() string { return \"ok\" }",
+		"",
+		"func NewController(msg string) *Controller {",
+		"\treturn &Controller{Message: msg}",
+		"}",
+		"",
+	}, "\n"))
+
+	writeFile(t, filepath.Join(root, "dep", "wire.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"import \"github.com/goforj/wire\"",
+		"",
+		"var Set = wire.NewSet(NewMessage, NewController)",
+		"",
+	}, "\n"))
+
+	writeFile(t, filepath.Join(root, "router", "router.go"), strings.Join([]string{
+		"package router",
+		"",
+		"import \"example.com/app/dep\"",
+		"",
+		"type Routes struct { Controller *dep.Controller }",
+		"",
+		"func ProvideRoutes(controller *dep.Controller) *Routes {",
+		"\treturn &Routes{Controller: controller}",
+		"}",
+		"",
+	}, "\n"))
+
+	writeFile(t, filepath.Join(root, "router", "wire.go"), strings.Join([]string{
+		"package router",
+		"",
+		"import \"github.com/goforj/wire\"",
+		"",
+		"var Set = wire.NewSet(ProvideRoutes)",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "GOWORK=off")
+	incrementalCtx := WithIncremental(context.Background(), true)
+
+	if _, errs := Generate(incrementalCtx, root, env, []string{"./app"}, &GenerateOptions{}); len(errs) > 0 {
+		t.Fatalf("baseline incremental Generate returned errors: %v", errs)
+	}
+
+	writeFile(t, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"type Controller struct { Message string; Count int }",
+		"",
+		"func NewMessage() string { return \"ok\" }",
+		"",
+		"func NewCount() int { return 7 }",
+		"",
+		"func NewController(msg string, count int) *Controller {",
+		"\treturn &Controller{Message: msg, Count: count}",
+		"}",
+		"",
+	}, "\n"))
+
+	writeFile(t, filepath.Join(root, "dep", "wire.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"import \"github.com/goforj/wire\"",
+		"",
+		"var Set = wire.NewSet(NewMessage, NewCount, NewController)",
+		"",
+	}, "\n"))
+
+	var incrementalLabels []string
+	incrementalTimedCtx := WithTiming(incrementalCtx, func(label string, _ time.Duration) {
+		incrementalLabels = append(incrementalLabels, label)
+	})
+	incrementalGens, errs := Generate(incrementalTimedCtx, root, env, []string{"./app"}, &GenerateOptions{})
+	if len(errs) > 0 {
+		t.Fatalf("incremental Generate returned errors: %v", errs)
+	}
+	if len(incrementalGens) != 1 || len(incrementalGens[0].Errs) > 0 {
+		t.Fatalf("unexpected incremental Generate results: %+v", incrementalGens)
+	}
+	if !containsLabel(incrementalLabels, "incremental.local_fastpath.load") {
+		t.Fatalf("expected incremental Generate to use local fast path, labels=%v", incrementalLabels)
+	}
+
+	normalGens, errs := Generate(context.Background(), root, env, []string{"./app"}, &GenerateOptions{})
+	if len(errs) > 0 {
+		t.Fatalf("normal Generate returned errors: %v", errs)
+	}
+	if len(normalGens) != 1 || len(normalGens[0].Errs) > 0 {
+		t.Fatalf("unexpected normal Generate results: %+v", normalGens)
+	}
+	if string(incrementalGens[0].Content) != string(normalGens[0].Content) {
+		t.Fatal("incremental output differs from normal Generate output when unchanged package depends on changed package")
+	}
+}
+
 func TestGenerateIncrementalInvalidShapeChangeDoesNotReuseManifest(t *testing.T) {
 	lockCacheHooks(t)
 	state := saveCacheHooks()
