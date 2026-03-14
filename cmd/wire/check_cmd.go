@@ -26,8 +26,9 @@ import (
 )
 
 type checkCmd struct {
-	tags    string
-	profile profileFlags
+	tags        string
+	incremental optionalBoolFlag
+	profile     profileFlags
 }
 
 // Name returns the subcommand name.
@@ -52,6 +53,7 @@ func (*checkCmd) Usage() string {
 // SetFlags registers flags for the subcommand.
 func (cmd *checkCmd) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&cmd.tags, "tags", "", "append build tags to the default wirebuild")
+	addIncrementalFlag(&cmd.incremental, f)
 	cmd.profile.addFlags(f)
 }
 
@@ -65,6 +67,7 @@ func (cmd *checkCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...inter
 	defer stop()
 	totalStart := time.Now()
 	ctx = withTiming(ctx, cmd.profile.timings)
+	ctx = cmd.incremental.apply(ctx)
 
 	wd, err := os.Getwd()
 	if err != nil {

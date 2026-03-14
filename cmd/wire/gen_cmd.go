@@ -29,6 +29,7 @@ type genCmd struct {
 	headerFile     string
 	prefixFileName string
 	tags           string
+	incremental    optionalBoolFlag
 	profile        profileFlags
 }
 
@@ -55,6 +56,7 @@ func (cmd *genCmd) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&cmd.headerFile, "header_file", "", "path to file to insert as a header in wire_gen.go")
 	f.StringVar(&cmd.prefixFileName, "output_file_prefix", "", "string to prepend to output file names.")
 	f.StringVar(&cmd.tags, "tags", "", "append build tags to the default wirebuild")
+	addIncrementalFlag(&cmd.incremental, f)
 	cmd.profile.addFlags(f)
 }
 
@@ -68,6 +70,7 @@ func (cmd *genCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interfa
 	defer stop()
 	totalStart := time.Now()
 	ctx = withTiming(ctx, cmd.profile.timings)
+	ctx = cmd.incremental.apply(ctx)
 
 	wd, err := os.Getwd()
 	if err != nil {
@@ -107,8 +110,12 @@ func (cmd *genCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interfa
 			// No Wire output. Maybe errors, maybe no Wire directives.
 			continue
 		}
-		if err := out.Commit(); err == nil {
-			log.Printf("%s: wrote %s (%s)\n", out.PkgPath, out.OutputPath, formatDuration(time.Since(totalStart)))
+		if wrote, err := out.CommitWithStatus(); err == nil {
+			if wrote {
+				log.Printf("%s: wrote %s (%s)\n", out.PkgPath, out.OutputPath, formatDuration(time.Since(totalStart)))
+			} else {
+				log.Printf("%s: unchanged %s (%s)\n", out.PkgPath, out.OutputPath, formatDuration(time.Since(totalStart)))
+			}
 		} else {
 			log.Printf("%s: failed to write %s: %v\n", out.PkgPath, out.OutputPath, err)
 			success = false

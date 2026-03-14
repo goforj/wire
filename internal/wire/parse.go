@@ -250,6 +250,9 @@ type Field struct {
 // In case of duplicate environment variables, the last one in the list
 // takes precedence.
 func Load(ctx context.Context, wd string, env []string, tags string, patterns []string) (*Info, []error) {
+	if IncrementalEnabled(ctx, env) {
+		debugf(ctx, "incremental=enabled")
+	}
 	loadStart := time.Now()
 	pkgs, loader, errs := load(ctx, wd, env, tags, patterns)
 	logTiming(ctx, "load.packages", loadStart)
@@ -365,7 +368,13 @@ func Load(ctx context.Context, wd string, env []string, tags string, patterns []
 // In case of duplicate environment variables, the last one in the list
 // takes precedence.
 func load(ctx context.Context, wd string, env []string, tags string, patterns []string) ([]*packages.Package, *lazyLoader, []error) {
+	var session *incrementalSession
 	fset := token.NewFileSet()
+	if IncrementalEnabled(ctx, env) {
+		session = getIncrementalSession(wd, env, tags)
+		fset = session.fset
+		debugf(ctx, "incremental session=enabled")
+	}
 	baseCfg := &packages.Config{
 		Context:    ctx,
 		Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps,
@@ -384,6 +393,7 @@ func load(ctx context.Context, wd string, env []string, tags string, patterns []
 	baseLoadStart := time.Now()
 	pkgs, err := packages.Load(baseCfg, escaped...)
 	logTiming(ctx, "load.packages.base.load", baseLoadStart)
+	logLoadDebug(ctx, "base", baseCfg.Mode, strings.Join(patterns, ","), wd, pkgs, nil)
 	if err != nil {
 		return nil, nil, []error{err}
 	}
@@ -393,15 +403,19 @@ func load(ctx context.Context, wd string, env []string, tags string, patterns []
 	if len(errs) > 0 {
 		return nil, nil, errs
 	}
+	fingerprints := analyzeIncrementalFingerprints(ctx, wd, env, tags, pkgs)
+	analyzeIncrementalGraph(ctx, wd, env, tags, pkgs, fingerprints)
 
 	baseFiles := collectPackageFiles(pkgs)
 	loader := &lazyLoader{
-		ctx:       ctx,
-		wd:        wd,
-		env:       env,
-		tags:      tags,
-		fset:      fset,
-		baseFiles: baseFiles,
+		ctx:          ctx,
+		wd:           wd,
+		env:          env,
+		tags:         tags,
+		fset:         fset,
+		baseFiles:    baseFiles,
+		session:      session,
+		fingerprints: fingerprints,
 	}
 	return pkgs, loader, nil
 }

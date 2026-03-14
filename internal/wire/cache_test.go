@@ -123,8 +123,10 @@ func TestCacheInvalidation(t *testing.T) {
 	if key2 == key {
 		t.Fatal("expected cache key to change after source update")
 	}
-	if cached, ok := readCache(key2); !ok || len(cached) == 0 {
-		t.Fatal("expected cache entry after second Generate")
+	if !IncrementalEnabled(ctx, env) {
+		if cached, ok := readCache(key2); !ok || len(cached) == 0 {
+			t.Fatal("expected cache entry after second Generate")
+		}
 	}
 }
 

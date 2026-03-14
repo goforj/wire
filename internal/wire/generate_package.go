@@ -47,7 +47,7 @@ func generateForPackage(ctx context.Context, pkg *packages.Package, loader *lazy
 		res.Errs = append(res.Errs, err)
 		return res
 	}
-	if cacheKey != "" {
+	if cacheKey != "" && !bypassPackageCache(ctx) {
 		cacheHitStart := time.Now()
 		if cached, ok := readCache(cacheKey); ok {
 			res.Content = cached

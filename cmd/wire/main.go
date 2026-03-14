@@ -34,6 +34,13 @@ import (
 	"github.com/google/subcommands"
 )
 
+var topLevelIncremental optionalBoolFlag
+
+const (
+	ansiRed   = "\033[31m"
+	ansiReset = "\033[0m"
+)
+
 // main wires up subcommands and executes the selected command.
 func main() {
 	subcommands.Register(subcommands.CommandsCommand(), "")
@@ -45,6 +52,7 @@ func main() {
 	subcommands.Register(&genCmd{}, "")
 	subcommands.Register(&watchCmd{}, "")
 	subcommands.Register(&showCmd{}, "")
+	addIncrementalFlag(&topLevelIncremental, flag.CommandLine)
 	flag.Parse()
 
 	// Initialize the default logger to log to stderr.
@@ -71,9 +79,9 @@ func main() {
 	// Default to running the "gen" command.
 	if args := flag.Args(); len(args) == 0 || !allCmds[args[0]] {
 		genCmd := &genCmd{}
-		os.Exit(int(genCmd.Execute(context.Background(), flag.CommandLine)))
+		os.Exit(int(genCmd.Execute(topLevelIncremental.apply(context.Background()), flag.CommandLine)))
 	}
-	os.Exit(int(subcommands.Execute(context.Background())))
+	os.Exit(int(subcommands.Execute(topLevelIncremental.apply(context.Background()))))
 }
 
 // installStackDumper registers signal handlers to dump goroutine stacks.
@@ -200,6 +208,34 @@ func newGenerateOptions(headerFile string) (*wire.GenerateOptions, error) {
 // logErrors logs each error with consistent formatting.
 func logErrors(errs []error) {
 	for _, err := range errs {
-		log.Println(strings.Replace(err.Error(), "\n", "\n\t", -1))
+		msg := err.Error()
+		if strings.Contains(msg, "\n") {
+			logMultilineError("\n    " + strings.ReplaceAll(msg, "\n", "\n    "))
+			continue
+		}
+		logMultilineError(msg)
 	}
+}
+
+func logMultilineError(msg string) {
+	if shouldColorStderr() {
+		log.Print(ansiRed + msg + ansiReset)
+		return
+	}
+	log.Print(msg)
+}
+
+func shouldColorStderr() bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	term := os.Getenv("TERM")
+	if term == "" || term == "dumb" {
+		return false
+	}
+	info, err := os.Stderr.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
 }

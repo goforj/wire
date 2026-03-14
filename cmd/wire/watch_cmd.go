@@ -36,6 +36,7 @@ type watchCmd struct {
 	headerFile     string
 	prefixFileName string
 	tags           string
+	incremental    optionalBoolFlag
 	profile        profileFlags
 	pollInterval   time.Duration
 	rescanInterval time.Duration
@@ -63,6 +64,7 @@ func (cmd *watchCmd) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&cmd.headerFile, "header_file", "", "path to file to insert as a header in wire_gen.go")
 	f.StringVar(&cmd.prefixFileName, "output_file_prefix", "", "string to prepend to output file names.")
 	f.StringVar(&cmd.tags, "tags", "", "append build tags to the default wirebuild")
+	addIncrementalFlag(&cmd.incremental, f)
 	f.DurationVar(&cmd.pollInterval, "poll_interval", 250*time.Millisecond, "interval between file stat checks")
 	f.DurationVar(&cmd.rescanInterval, "rescan_interval", 2*time.Second, "interval to rescan for new or removed Go files")
 	cmd.profile.addFlags(f)
@@ -77,6 +79,7 @@ func (cmd *watchCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...inter
 	}
 	defer stop()
 	ctx = withTiming(ctx, cmd.profile.timings)
+	ctx = cmd.incremental.apply(ctx)
 
 	if cmd.pollInterval <= 0 {
 		log.Println("poll_interval must be greater than zero")
@@ -126,8 +129,12 @@ func (cmd *watchCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...inter
 			if len(out.Content) == 0 {
 				continue
 			}
-			if err := out.Commit(); err == nil {
-				log.Printf("%s: wrote %s (%s)\n", out.PkgPath, out.OutputPath, formatDuration(time.Since(totalStart)))
+			if wrote, err := out.CommitWithStatus(); err == nil {
+				if wrote {
+					log.Printf("%s: wrote %s (%s)\n", out.PkgPath, out.OutputPath, formatDuration(time.Since(totalStart)))
+				} else {
+					log.Printf("%s: unchanged %s (%s)\n", out.PkgPath, out.OutputPath, formatDuration(time.Since(totalStart)))
+				}
 			} else {
 				log.Printf("%s: failed to write %s: %v\n", out.PkgPath, out.OutputPath, err)
 				success = false

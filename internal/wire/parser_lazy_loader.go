@@ -26,12 +26,15 @@ import (
 )
 
 type lazyLoader struct {
-	ctx       context.Context
-	wd        string
-	env       []string
-	tags      string
-	fset      *token.FileSet
-	baseFiles map[string]map[string]struct{}
+	ctx          context.Context
+	wd           string
+	env          []string
+	tags         string
+	fset         *token.FileSet
+	baseFiles    map[string]map[string]struct{}
+	session      *incrementalSession
+	fingerprints *incrementalFingerprintSnapshot
+	loaded       map[string]*packages.Package
 }
 
 func collectPackageFiles(pkgs []*packages.Package) map[string]map[string]struct{} {
@@ -74,10 +77,11 @@ func (ll *lazyLoader) load(pkgPath string) ([]*packages.Package, []error) {
 }
 
 func (ll *lazyLoader) fullMode() packages.LoadMode {
-	return packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax
+	return packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax | packages.NeedExportFile
 }
 
 func (ll *lazyLoader) loadWithMode(pkgPath string, mode packages.LoadMode, timingLabel string) ([]*packages.Package, []error) {
+	parseStats := &parseFileStats{}
 	cfg := &packages.Config{
 		Context:    ll.ctx,
 		Mode:       mode,
@@ -85,7 +89,7 @@ func (ll *lazyLoader) loadWithMode(pkgPath string, mode packages.LoadMode, timin
 		Env:        ll.env,
 		BuildFlags: []string{"-tags=wireinject"},
 		Fset:       ll.fset,
-		ParseFile:  ll.parseFileFor(pkgPath),
+		ParseFile:  ll.parseFileFor(pkgPath, parseStats),
 	}
 	if len(ll.tags) > 0 {
 		cfg.BuildFlags[0] += " " + ll.tags
@@ -93,6 +97,7 @@ func (ll *lazyLoader) loadWithMode(pkgPath string, mode packages.LoadMode, timin
 	loadStart := time.Now()
 	pkgs, err := packages.Load(cfg, "pattern="+pkgPath)
 	logTiming(ll.ctx, timingLabel, loadStart)
+	logLoadDebug(ll.ctx, "lazy", mode, pkgPath, ll.wd, pkgs, parseStats)
 	if err != nil {
 		return nil, []error{err}
 	}
@@ -100,26 +105,52 @@ func (ll *lazyLoader) loadWithMode(pkgPath string, mode packages.LoadMode, timin
 	if len(errs) > 0 {
 		return nil, errs
 	}
+	ll.rememberPackages(pkgs)
 	return pkgs, nil
 }
 
-func (ll *lazyLoader) parseFileFor(pkgPath string) func(*token.FileSet, string, []byte) (*ast.File, error) {
-	primary := ll.baseFiles[pkgPath]
+func (ll *lazyLoader) rememberPackages(pkgs []*packages.Package) {
+	if ll == nil || len(pkgs) == 0 {
+		return
+	}
+	if ll.loaded == nil {
+		ll.loaded = make(map[string]*packages.Package)
+	}
+	for path, pkg := range collectAllPackages(pkgs) {
+		if pkg != nil {
+			ll.loaded[path] = pkg
+		}
+	}
+}
+
+func (ll *lazyLoader) parseFileFor(pkgPath string, stats *parseFileStats) func(*token.FileSet, string, []byte) (*ast.File, error) {
+	primary := primaryFileSet(ll.baseFiles[pkgPath])
 	return func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
-		mode := parser.SkipObjectResolution
-		if primary != nil {
-			if _, ok := primary[filepath.Clean(filename)]; ok {
-				mode = parser.ParseComments | parser.SkipObjectResolution
+		start := time.Now()
+		isPrimary := isPrimaryFile(primary, filename)
+		if !isPrimary && ll.session != nil {
+			if file, ok := ll.session.getParsedDep(filename, src); ok {
+				if stats != nil {
+					stats.record(false, time.Since(start), nil, true)
+				}
+				return file, nil
 			}
 		}
+		mode := parser.SkipObjectResolution
+		if isPrimary {
+			mode = parser.ParseComments | parser.SkipObjectResolution
+		}
 		file, err := parser.ParseFile(fset, filename, src, mode)
+		if stats != nil {
+			stats.record(isPrimary, time.Since(start), err, false)
+		}
 		if err != nil {
 			return nil, err
 		}
 		if primary == nil {
 			return file, nil
 		}
-		if _, ok := primary[filepath.Clean(filename)]; ok {
+		if isPrimary {
 			return file, nil
 		}
 		for _, decl := range file.Decls {
@@ -127,6 +158,9 @@ func (ll *lazyLoader) parseFileFor(pkgPath string) func(*token.FileSet, string, 
 				fn.Body = nil
 				fn.Doc = nil
 			}
+		}
+		if ll.session != nil {
+			ll.session.storeParsedDep(filename, src, file)
 		}
 		return file, nil
 	}

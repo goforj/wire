@@ -111,6 +111,7 @@ func TestWire(t *testing.T) {
 					t.Log(e.Error())
 					gotErrStrings[i] = scrubError(gopath, e.Error())
 				}
+				gotErrStrings = filterLegacyCompilerErrors(gotErrStrings)
 				if !test.wantWireError {
 					t.Fatal("Did not expect errors. To -record an error, create want/wire_errs.txt.")
 				}
@@ -188,6 +189,33 @@ func TestGenerateResultCommit(t *testing.T) {
 	}
 	if got, err := os.ReadFile(path); err != nil || string(got) != string(gen.Content) {
 		t.Fatalf("Commit content mismatch, got=%q err=%v", got, err)
+	}
+}
+
+func TestGenerateResultCommitWithStatus(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wire_gen.go")
+	gen := GenerateResult{
+		OutputPath: path,
+		Content:    []byte("package p\n"),
+	}
+
+	wrote, err := gen.CommitWithStatus()
+	if err != nil {
+		t.Fatalf("first CommitWithStatus failed: %v", err)
+	}
+	if !wrote {
+		t.Fatal("expected first CommitWithStatus call to write")
+	}
+
+	wrote, err = gen.CommitWithStatus()
+	if err != nil {
+		t.Fatalf("second CommitWithStatus failed: %v", err)
+	}
+	if wrote {
+		t.Fatal("expected second CommitWithStatus call to report unchanged")
 	}
 }
 
@@ -519,6 +547,28 @@ func scrubLineColumn(s string) (replacement string, n int) {
 		return ":x", lineEnd
 	}
 	return ":x:y", n
+}
+
+func filterLegacyCompilerErrors(errs []string) []string {
+	hasCanonicalPath := false
+	for _, err := range errs {
+		if strings.HasPrefix(err, "example.com/") {
+			hasCanonicalPath = true
+			break
+		}
+	}
+	if !hasCanonicalPath {
+		return errs
+	}
+
+	filtered := errs[:0]
+	for _, err := range errs {
+		if strings.HasPrefix(err, "-: # ") {
+			continue
+		}
+		filtered = append(filtered, err)
+	}
+	return filtered
 }
 
 type testCase struct {

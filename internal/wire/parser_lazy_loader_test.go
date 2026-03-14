@@ -47,7 +47,7 @@ func TestLazyLoaderParseFileFor(t *testing.T) {
 		"",
 	}, "\n")
 
-	parse := ll.parseFileFor(pkgPath)
+	parse := ll.parseFileFor(pkgPath, &parseFileStats{})
 	file, err := parse(fset, primary, []byte(src))
 	if err != nil {
 		t.Fatalf("parse primary: %v", err)
@@ -70,6 +70,59 @@ func TestLazyLoaderParseFileFor(t *testing.T) {
 	}
 	if fn.Doc != nil {
 		t.Fatal("expected secondary file to strip doc comment")
+	}
+}
+
+func TestLazyLoaderParseFileForCachesDependencyFiles(t *testing.T) {
+	t.Helper()
+	fset := token.NewFileSet()
+	pkgPath := "example.com/pkg"
+	root := t.TempDir()
+	primary := filepath.Join(root, "primary.go")
+	secondary := filepath.Join(root, "secondary.go")
+	session := &incrementalSession{
+		fset:       fset,
+		parsedDeps: make(map[string]cachedParsedFile),
+	}
+	ll := &lazyLoader{
+		fset: fset,
+		baseFiles: map[string]map[string]struct{}{
+			pkgPath: {filepath.Clean(primary): {}},
+		},
+		session: session,
+	}
+	src := []byte(strings.Join([]string{
+		"package pkg",
+		"",
+		"func Foo() {",
+		"\tprintln(\"hi\")",
+		"}",
+		"",
+	}, "\n"))
+
+	stats1 := &parseFileStats{}
+	parse1 := ll.parseFileFor(pkgPath, stats1)
+	file1, err := parse1(fset, secondary, src)
+	if err != nil {
+		t.Fatalf("first parse: %v", err)
+	}
+	snap1 := stats1.snapshot()
+	if snap1.cacheHits != 0 || snap1.cacheMisses != 1 {
+		t.Fatalf("first parse stats = %+v, want 0 hits and 1 miss", snap1)
+	}
+
+	stats2 := &parseFileStats{}
+	parse2 := ll.parseFileFor(pkgPath, stats2)
+	file2, err := parse2(fset, secondary, src)
+	if err != nil {
+		t.Fatalf("second parse: %v", err)
+	}
+	if file1 != file2 {
+		t.Fatal("expected cached dependency parse to reuse AST")
+	}
+	snap2 := stats2.snapshot()
+	if snap2.cacheHits != 1 || snap2.cacheMisses != 0 {
+		t.Fatalf("second parse stats = %+v, want 1 hit and 0 misses", snap2)
 	}
 }
 

@@ -25,6 +25,7 @@ import (
 	"go/token"
 	"go/types"
 	"io/ioutil"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -53,10 +54,27 @@ type GenerateResult struct {
 
 // Commit writes the generated file to disk.
 func (gen GenerateResult) Commit() error {
+	_, err := gen.CommitWithStatus()
+	return err
+}
+
+// CommitWithStatus writes the generated file to disk when the content changed.
+// It returns whether the file was written.
+func (gen GenerateResult) CommitWithStatus() (bool, error) {
 	if len(gen.Content) == 0 {
-		return nil
+		return false, nil
 	}
-	return ioutil.WriteFile(gen.OutputPath, gen.Content, 0666)
+	current, err := os.ReadFile(gen.OutputPath)
+	if err == nil && bytes.Equal(current, gen.Content) {
+		return false, nil
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	if err := ioutil.WriteFile(gen.OutputPath, gen.Content, 0666); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // GenerateOptions holds options for Generate.
@@ -83,6 +101,20 @@ func Generate(ctx context.Context, wd string, env []string, patterns []string, o
 	if opts == nil {
 		opts = &GenerateOptions{}
 	}
+	var preloadState *incrementalPreloadState
+	bypassIncrementalManifest := false
+	if IncrementalEnabled(ctx, env) {
+		debugf(ctx, "incremental=enabled")
+		preloadState, _ = prepareIncrementalPreloadState(ctx, wd, env, patterns, opts)
+		if cached, ok := readPreloadIncrementalManifestResultsFromState(ctx, wd, env, patterns, opts, preloadState, preloadState != nil); ok {
+			return cached, nil
+		}
+		if generated, ok, bypass, errs := tryIncrementalLocalFastPath(ctx, wd, env, patterns, opts, preloadState); ok || len(errs) > 0 {
+			return generated, errs
+		} else if bypass {
+			bypassIncrementalManifest = true
+		}
+	}
 	if cached, ok := readManifestResults(wd, env, patterns, opts); ok {
 		return cached, nil
 	}
@@ -92,14 +124,67 @@ func Generate(ctx context.Context, wd string, env []string, patterns []string, o
 	if len(errs) > 0 {
 		return nil, errs
 	}
+	if !bypassIncrementalManifest {
+		if cached, ok := readIncrementalManifestResults(ctx, wd, env, patterns, opts, pkgs, loader.fingerprints); ok {
+			warmPackageOutputCache(pkgs, opts, cached)
+			return cached, nil
+		}
+	} else {
+		debugf(ctx, "incremental.manifest bypass reason=fastpath_error")
+		ctx = withBypassPackageCache(ctx)
+	}
 	generated := make([]GenerateResult, len(pkgs))
 	for i, pkg := range pkgs {
 		generated[i] = generateForPackage(ctx, pkg, loader, opts)
 	}
 	if allGeneratedOK(generated) {
+		if IncrementalEnabled(ctx, env) {
+			writeIncrementalPackageSummaries(loader, pkgs)
+		}
 		writeManifest(wd, env, patterns, opts, pkgs)
+		writeIncrementalManifest(wd, env, patterns, opts, incrementalManifestPackages(pkgs, loader), loader.fingerprints, generated)
 	}
 	return generated, nil
+}
+
+func warmPackageOutputCache(pkgs []*packages.Package, opts *GenerateOptions, generated []GenerateResult) {
+	if len(pkgs) == 0 || len(generated) == 0 {
+		return
+	}
+	byPkg := make(map[string][]byte, len(generated))
+	for _, gen := range generated {
+		if len(gen.Content) == 0 {
+			continue
+		}
+		byPkg[gen.PkgPath] = gen.Content
+	}
+	for _, pkg := range pkgs {
+		content := byPkg[pkg.PkgPath]
+		if len(content) == 0 {
+			continue
+		}
+		key, err := cacheKeyForPackage(pkg, opts)
+		if err != nil || key == "" {
+			continue
+		}
+		writeCache(key, content)
+	}
+}
+
+func incrementalManifestPackages(pkgs []*packages.Package, loader *lazyLoader) []*packages.Package {
+	if loader == nil || len(loader.loaded) == 0 {
+		return pkgs
+	}
+	out := make([]*packages.Package, 0, len(loader.loaded))
+	for _, pkg := range loader.loaded {
+		if pkg != nil {
+			out = append(out, pkg)
+		}
+	}
+	if len(out) == 0 {
+		return pkgs
+	}
+	return out
 }
 
 // generateInjectors generates the injectors for a given package.
