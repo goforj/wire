@@ -37,6 +37,13 @@ type cachedParsedFile struct {
 
 var incrementalSessions sync.Map
 
+func clearIncrementalSessions() {
+	incrementalSessions.Range(func(key, _ any) bool {
+		incrementalSessions.Delete(key)
+		return true
+	})
+}
+
 func sessionKey(wd string, env []string, tags string) string {
 	var b strings.Builder
 	b.WriteString(filepath.Clean(wd))

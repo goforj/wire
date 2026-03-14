@@ -32,6 +32,7 @@ func CacheDir() string {
 
 // ClearCache removes all cached data.
 func ClearCache() error {
+	clearIncrementalSessions()
 	return osRemoveAll(cacheDir())
 }
 

@@ -38,9 +38,9 @@ func (*cacheCmd) Synopsis() string {
 
 // Usage returns the help text for the subcommand.
 func (*cacheCmd) Usage() string {
-	return `cache [-clear]
+	return `cache [-clear|clear]
 
-  By default, prints the cache directory. With -clear, removes all cache files.
+  By default, prints the cache directory. With -clear or clear, removes all cache files.
 `
 }
 
@@ -51,6 +51,9 @@ func (cmd *cacheCmd) SetFlags(f *flag.FlagSet) {
 
 // Execute runs the subcommand.
 func (cmd *cacheCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
+	if f.NArg() > 0 && f.Arg(0) == "clear" {
+		cmd.clear = true
+	}
 	if cmd.clear {
 		if err := wire.ClearCache(); err != nil {
 			log.Printf("failed to clear cache: %v\n", err)

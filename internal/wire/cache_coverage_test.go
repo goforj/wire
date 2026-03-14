@@ -166,6 +166,36 @@ func TestCacheStoreReadWrite(t *testing.T) {
 	}
 }
 
+func TestClearCacheClearsIncrementalSessions(t *testing.T) {
+	lockCacheHooks(t)
+	state := saveCacheHooks()
+	t.Cleanup(func() { restoreCacheHooks(state) })
+
+	tempDir := t.TempDir()
+	osTempDir = func() string { return tempDir }
+
+	sessionA := getIncrementalSession("/tmp/example", []string{"WIRE_INCREMENTAL=1"}, "")
+	if sessionA == nil {
+		t.Fatal("expected incremental session")
+	}
+	sessionB := getIncrementalSession("/tmp/example", []string{"WIRE_INCREMENTAL=1"}, "")
+	if sessionA != sessionB {
+		t.Fatal("expected same incremental session before clear")
+	}
+
+	if err := ClearCache(); err != nil {
+		t.Fatalf("ClearCache failed: %v", err)
+	}
+
+	sessionC := getIncrementalSession("/tmp/example", []string{"WIRE_INCREMENTAL=1"}, "")
+	if sessionC == nil {
+		t.Fatal("expected incremental session after clear")
+	}
+	if sessionC == sessionA {
+		t.Fatal("expected ClearCache to drop in-process incremental sessions")
+	}
+}
+
 func TestCacheStoreReadError(t *testing.T) {
 	lockCacheHooks(t)
 	state := saveCacheHooks()
