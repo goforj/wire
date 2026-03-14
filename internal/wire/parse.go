@@ -403,8 +403,11 @@ func load(ctx context.Context, wd string, env []string, tags string, patterns []
 	if len(errs) > 0 {
 		return nil, nil, errs
 	}
-	fingerprints := analyzeIncrementalFingerprints(ctx, wd, env, tags, pkgs)
-	analyzeIncrementalGraph(ctx, wd, env, tags, pkgs, fingerprints)
+	var fingerprints *incrementalFingerprintSnapshot
+	if !incrementalColdBootstrapEnabled(ctx) {
+		fingerprints = analyzeIncrementalFingerprints(ctx, wd, env, tags, pkgs)
+		analyzeIncrementalGraph(ctx, wd, env, tags, pkgs, fingerprints)
+	}
 
 	baseFiles := collectPackageFiles(pkgs)
 	loader := &lazyLoader{

@@ -124,6 +124,52 @@ func collectIncrementalFingerprints(wd string, tags string, pkgs []*packages.Pac
 	return snapshot
 }
 
+func buildIncrementalManifestSnapshotFromPackages(wd string, tags string, pkgs []*packages.Package) *incrementalFingerprintSnapshot {
+	all := collectAllPackages(pkgs)
+	moduleRoot := findModuleRoot(wd)
+	snapshot := &incrementalFingerprintSnapshot{
+		fingerprints: make(map[string]*packageFingerprint),
+	}
+	for _, pkg := range all {
+		if classifyPackageLocation(moduleRoot, pkg) != "local" {
+			continue
+		}
+		files := packageFingerprintFiles(pkg)
+		if len(files) == 0 {
+			continue
+		}
+		sort.Strings(files)
+		metaFiles, err := buildCacheFiles(files)
+		if err != nil {
+			continue
+		}
+		shapeHash, err := packageShapeHashFromSyntax(pkg, files)
+		if err != nil {
+			continue
+		}
+		localImports := make([]string, 0, len(pkg.Imports))
+		for _, imp := range pkg.Imports {
+			if classifyPackageLocation(moduleRoot, imp) == "local" {
+				localImports = append(localImports, imp.PkgPath)
+			}
+		}
+		sort.Strings(localImports)
+		snapshot.fingerprints[pkg.PkgPath] = &packageFingerprint{
+			Version:      incrementalFingerprintVersion,
+			WD:           filepath.Clean(wd),
+			Tags:         tags,
+			PkgPath:      pkg.PkgPath,
+			Files:        metaFiles,
+			ShapeHash:    shapeHash,
+			LocalImports: localImports,
+		}
+	}
+	if len(snapshot.fingerprints) == 0 {
+		return nil
+	}
+	return snapshot
+}
+
 func packageFingerprintFiles(pkg *packages.Package) []string {
 	if pkg == nil {
 		return nil
@@ -202,14 +248,61 @@ func packageShapeHash(files []string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		stripFunctionBodies(file)
-		if err := printer.Fprint(&buf, fset, file); err != nil {
-			return "", err
-		}
+		writeSyntaxShapeHash(&buf, fset, file)
 		buf.WriteByte(0)
 	}
 	sum := sha256.Sum256(buf.Bytes())
 	return fmt.Sprintf("%x", sum[:]), nil
+}
+
+func packageShapeHashFromSyntax(pkg *packages.Package, files []string) (string, error) {
+	if pkg == nil || len(pkg.Syntax) == 0 || pkg.Fset == nil {
+		return packageShapeHash(files)
+	}
+	var buf bytes.Buffer
+	for _, file := range pkg.Syntax {
+		if file == nil {
+			continue
+		}
+		writeSyntaxShapeHash(&buf, pkg.Fset, file)
+		buf.WriteByte(0)
+	}
+	sum := sha256.Sum256(buf.Bytes())
+	return fmt.Sprintf("%x", sum[:]), nil
+}
+
+func writeSyntaxShapeHash(buf *bytes.Buffer, fset *token.FileSet, file *ast.File) {
+	if file == nil || buf == nil || fset == nil {
+		return
+	}
+	if file.Name != nil {
+		buf.WriteString("package ")
+		buf.WriteString(file.Name.Name)
+		buf.WriteByte('\n')
+	}
+	for _, decl := range file.Decls {
+		switch decl := decl.(type) {
+		case *ast.FuncDecl:
+			writeNodeHash(buf, fset, decl.Recv)
+			buf.WriteByte(' ')
+			if decl.Name != nil {
+				buf.WriteString(decl.Name.Name)
+			}
+			buf.WriteByte(' ')
+			writeNodeHash(buf, fset, decl.Type)
+			buf.WriteByte('\n')
+		default:
+			writeNodeHash(buf, fset, decl)
+			buf.WriteByte('\n')
+		}
+	}
+}
+
+func writeNodeHash(buf *bytes.Buffer, fset *token.FileSet, node interface{}) {
+	if buf == nil || fset == nil || node == nil {
+		return
+	}
+	_ = printer.Fprint(buf, fset, node)
 }
 
 func stripFunctionBodies(file *ast.File) {

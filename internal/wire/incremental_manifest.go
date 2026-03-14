@@ -143,13 +143,21 @@ func readIncrementalManifestResults(ctx context.Context, wd string, env []string
 }
 
 func writeIncrementalManifest(wd string, env []string, patterns []string, opts *GenerateOptions, pkgs []*packages.Package, snapshot *incrementalFingerprintSnapshot, generated []GenerateResult) {
+	writeIncrementalManifestWithOptions(wd, env, patterns, opts, pkgs, snapshot, generated, true)
+}
+
+func writeIncrementalManifestWithOptions(wd string, env []string, patterns []string, opts *GenerateOptions, pkgs []*packages.Package, snapshot *incrementalFingerprintSnapshot, generated []GenerateResult, includeExternalFiles bool) {
 	if snapshot == nil || len(generated) == 0 {
 		return
 	}
 	externalPkgs := buildExternalPackageExports(wd, pkgs)
-	externalFiles, err := buildExternalPackageFiles(wd, pkgs)
-	if err != nil {
-		return
+	var externalFiles []cacheFile
+	if includeExternalFiles {
+		var err error
+		externalFiles, err = buildExternalPackageFiles(wd, pkgs)
+		if err != nil {
+			return
+		}
 	}
 	manifest := &incrementalManifest{
 		Version:       incrementalManifestVersion,

@@ -23,6 +23,7 @@ import (
 const IncrementalEnvVar = "WIRE_INCREMENTAL"
 
 type incrementalKey struct{}
+type incrementalColdBootstrapKey struct{}
 
 // WithIncremental overrides incremental-mode resolution for the provided
 // context. This takes precedence over the environment variable.
@@ -31,6 +32,13 @@ func WithIncremental(ctx context.Context, enabled bool) context.Context {
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, incrementalKey{}, enabled)
+}
+
+func withIncrementalColdBootstrap(ctx context.Context, enabled bool) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, incrementalColdBootstrapKey{}, enabled)
 }
 
 // IncrementalEnabled reports whether incremental mode is enabled for the
@@ -52,6 +60,18 @@ func IncrementalEnabled(ctx context.Context, env []string) bool {
 		return false
 	}
 	return enabled
+}
+
+func incrementalColdBootstrapEnabled(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	if v := ctx.Value(incrementalColdBootstrapKey{}); v != nil {
+		if enabled, ok := v.(bool); ok {
+			return enabled
+		}
+	}
+	return false
 }
 
 func lookupEnv(env []string, key string) (string, bool) {

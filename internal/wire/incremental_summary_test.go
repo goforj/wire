@@ -242,6 +242,14 @@ func TestCollectIncrementalPackageSummariesUsesCacheForUnchanged(t *testing.T) {
 	if len(gens) != 1 || len(gens[0].Errs) > 0 {
 		t.Fatalf("unexpected Generate result: %+v", gens)
 	}
+	pkgs, loader, errs := load(ctx, root, env, "", []string{"./app"})
+	if len(errs) > 0 {
+		t.Fatalf("load returned errors while seeding summaries: %v", errs)
+	}
+	if _, errs := newObjectCache(pkgs, loader).ensurePackage("example.com/app/app"); len(errs) > 0 {
+		t.Fatalf("ensurePackage returned errors while seeding summaries: %v", errs)
+	}
+	writeIncrementalPackageSummaries(loader, pkgs)
 
 	writeFile(t, depFile, strings.Join([]string{
 		"package dep",
@@ -264,7 +272,7 @@ func TestCollectIncrementalPackageSummariesUsesCacheForUnchanged(t *testing.T) {
 		"",
 	}, "\n"))
 
-	pkgs, loader, errs := load(ctx, root, env, "", []string{"./app"})
+	pkgs, loader, errs = load(ctx, root, env, "", []string{"./app"})
 	if len(errs) > 0 {
 		t.Fatalf("load returned errors: %v", errs)
 	}

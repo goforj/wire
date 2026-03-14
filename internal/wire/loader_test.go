@@ -794,6 +794,43 @@ func TestGenerateIncrementalShapeChangeMatchesNormalGenerate(t *testing.T) {
 	}
 }
 
+func TestGenerateIncrementalColdBootstrapStillSeedsFastPath(t *testing.T) {
+	lockCacheHooks(t)
+	state := saveCacheHooks()
+	t.Cleanup(func() { restoreCacheHooks(state) })
+
+	cacheRoot := t.TempDir()
+	osTempDir = func() string { return cacheRoot }
+
+	repoRoot := mustRepoRoot(t)
+	root := t.TempDir()
+	writeLargeBenchmarkModule(t, repoRoot, root, 24)
+
+	env := append(os.Environ(), "GOWORK=off")
+	ctx := WithIncremental(context.Background(), true)
+
+	if _, errs := Generate(ctx, root, env, []string{"./app"}, &GenerateOptions{}); len(errs) > 0 {
+		t.Fatalf("cold bootstrap Generate returned errors: %v", errs)
+	}
+
+	mutateLargeBenchmarkModule(t, root, 12)
+
+	var labels []string
+	timedCtx := WithTiming(ctx, func(label string, _ time.Duration) {
+		labels = append(labels, label)
+	})
+	gens, errs := Generate(timedCtx, root, env, []string{"./app"}, &GenerateOptions{})
+	if len(errs) > 0 {
+		t.Fatalf("shape-change Generate returned errors: %v", errs)
+	}
+	if len(gens) != 1 || len(gens[0].Errs) > 0 {
+		t.Fatalf("unexpected Generate results: %+v", gens)
+	}
+	if !containsLabel(labels, "incremental.local_fastpath.load") {
+		t.Fatalf("expected cold bootstrap to seed fast path, labels=%v", labels)
+	}
+}
+
 func TestGenerateIncrementalShapeChangeWithUnchangedDependentPackageMatchesNormalGenerate(t *testing.T) {
 	lockCacheHooks(t)
 	state := saveCacheHooks()

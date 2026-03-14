@@ -103,9 +103,14 @@ func Generate(ctx context.Context, wd string, env []string, patterns []string, o
 	}
 	var preloadState *incrementalPreloadState
 	bypassIncrementalManifest := false
+	coldBootstrap := false
 	if IncrementalEnabled(ctx, env) {
 		debugf(ctx, "incremental=enabled")
 		preloadState, _ = prepareIncrementalPreloadState(ctx, wd, env, patterns, opts)
+		coldBootstrap = preloadState == nil
+		if coldBootstrap {
+			ctx = withIncrementalColdBootstrap(ctx, true)
+		}
 		if cached, ok := readPreloadIncrementalManifestResultsFromState(ctx, wd, env, patterns, opts, preloadState, preloadState != nil); ok {
 			return cached, nil
 		}
@@ -139,12 +144,40 @@ func Generate(ctx context.Context, wd string, env []string, patterns []string, o
 	}
 	if allGeneratedOK(generated) {
 		if IncrementalEnabled(ctx, env) {
-			writeIncrementalPackageSummaries(loader, pkgs)
+			if coldBootstrap {
+				snapshot := buildIncrementalManifestSnapshotFromPackages(wd, opts.Tags, incrementalManifestPackages(pkgs, loader))
+				writeIncrementalManifestWithOptions(wd, env, patterns, opts, incrementalManifestPackages(pkgs, loader), snapshot, generated, false)
+				if snapshot != nil {
+					writeIncrementalGraphFromSnapshot(wd, opts.Tags, manifestOutputPkgPathsFromGenerated(generated), snapshot.fingerprints)
+				}
+			} else {
+				writeIncrementalPackageSummaries(loader, pkgs)
+				writeIncrementalManifest(wd, env, patterns, opts, incrementalManifestPackages(pkgs, loader), loader.fingerprints, generated)
+			}
 		}
 		writeManifest(wd, env, patterns, opts, pkgs)
-		writeIncrementalManifest(wd, env, patterns, opts, incrementalManifestPackages(pkgs, loader), loader.fingerprints, generated)
 	}
 	return generated, nil
+}
+
+func manifestOutputPkgPathsFromGenerated(generated []GenerateResult) []string {
+	if len(generated) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(generated))
+	out := make([]string, 0, len(generated))
+	for _, gen := range generated {
+		if gen.PkgPath == "" {
+			continue
+		}
+		if _, ok := seen[gen.PkgPath]; ok {
+			continue
+		}
+		seen[gen.PkgPath] = struct{}{}
+		out = append(out, gen.PkgPath)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func warmPackageOutputCache(pkgs []*packages.Package, opts *GenerateOptions, generated []GenerateResult) {
