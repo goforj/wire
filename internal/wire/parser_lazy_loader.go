@@ -128,7 +128,8 @@ func (ll *lazyLoader) parseFileFor(pkgPath string, stats *parseFileStats) func(*
 	return func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
 		start := time.Now()
 		isPrimary := isPrimaryFile(primary, filename)
-		if !isPrimary && ll.session != nil {
+		keepBodies := ll.shouldKeepDependencyBodies(filename)
+		if !isPrimary && !keepBodies && ll.session != nil {
 			if file, ok := ll.session.getParsedDep(filename, src); ok {
 				if stats != nil {
 					stats.record(false, time.Since(start), nil, true)
@@ -153,6 +154,9 @@ func (ll *lazyLoader) parseFileFor(pkgPath string, stats *parseFileStats) func(*
 		if isPrimary {
 			return file, nil
 		}
+		if keepBodies {
+			return file, nil
+		}
 		for _, decl := range file.Decls {
 			if fn, ok := decl.(*ast.FuncDecl); ok {
 				fn.Body = nil
@@ -164,4 +168,21 @@ func (ll *lazyLoader) parseFileFor(pkgPath string, stats *parseFileStats) func(*
 		}
 		return file, nil
 	}
+}
+
+func (ll *lazyLoader) shouldKeepDependencyBodies(filename string) bool {
+	if ll == nil || ll.fingerprints == nil || len(ll.fingerprints.touched) == 0 {
+		return false
+	}
+	clean := filepath.Clean(filename)
+	for _, pkgPath := range ll.fingerprints.touched {
+		files := ll.baseFiles[pkgPath]
+		if len(files) == 0 {
+			continue
+		}
+		if _, ok := files[clean]; ok {
+			return true
+		}
+	}
+	return false
 }

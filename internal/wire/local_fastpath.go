@@ -63,6 +63,7 @@ func tryIncrementalLocalFastPath(ctx context.Context, wd string, env []string, p
 	if err != nil {
 		debugf(ctx, "incremental.local_fastpath miss reason=%v", err)
 		if shouldBypassIncrementalManifestAfterFastPathError(err) {
+			invalidateIncrementalPreloadState(state)
 			return nil, true, true, []error{err}
 		}
 		return nil, false, false, nil
@@ -104,6 +105,18 @@ func tryIncrementalLocalFastPath(ctx context.Context, wd string, env []string, p
 	return generated, true, false, nil
 }
 
+func validateIncrementalTouchedPackages(ctx context.Context, wd string, opts *GenerateOptions, state *incrementalPreloadState, snapshot *incrementalFingerprintSnapshot) error {
+	if state == nil || state.manifest == nil || snapshot == nil || len(snapshot.touched) == 0 {
+		return nil
+	}
+	roots := manifestOutputPkgPaths(state.manifest)
+	if len(roots) != 1 {
+		return nil
+	}
+	_, err := loadLocalPackagesForFastPath(ctx, wd, opts.Tags, roots[0], snapshot.touched, snapshotPackageFingerprints(snapshot), state.manifest.ExternalPkgs)
+	return err
+}
+
 func shouldBypassIncrementalManifestAfterFastPathError(err error) bool {
 	if err == nil {
 		return false
@@ -113,6 +126,13 @@ func shouldBypassIncrementalManifestAfterFastPathError(err error) bool {
 		return false
 	}
 	return strings.Contains(msg, "type-check failed for ")
+}
+
+func invalidateIncrementalPreloadState(state *incrementalPreloadState) {
+	if state == nil {
+		return
+	}
+	removeIncrementalManifestFile(state.selectorKey)
 }
 
 func formatLocalTypeCheckError(wd string, pkgPath string, errs []packages.Error) error {

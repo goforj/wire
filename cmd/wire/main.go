@@ -21,6 +21,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
@@ -37,7 +38,7 @@ import (
 var topLevelIncremental optionalBoolFlag
 
 const (
-	ansiRed   = "\033[31m"
+	ansiRed   = "\033[1;31m"
 	ansiReset = "\033[0m"
 )
 
@@ -208,7 +209,7 @@ func newGenerateOptions(headerFile string) (*wire.GenerateOptions, error) {
 // logErrors logs each error with consistent formatting.
 func logErrors(errs []error) {
 	for _, err := range errs {
-		msg := err.Error()
+		msg := formatLoggedError(err)
 		if strings.Contains(msg, "\n") {
 			logMultilineError("\n    " + strings.ReplaceAll(msg, "\n", "\n    "))
 			continue
@@ -217,25 +218,78 @@ func logErrors(errs []error) {
 	}
 }
 
-func logMultilineError(msg string) {
-	if shouldColorStderr() {
-		log.Print(ansiRed + msg + ansiReset)
-		return
+func formatLoggedError(err error) string {
+	if err == nil {
+		return ""
 	}
-	log.Print(msg)
+	msg := err.Error()
+	if strings.HasPrefix(msg, "inject ") {
+		return "solve failed\n" + msg
+	}
+	if idx := strings.Index(msg, ": inject "); idx >= 0 {
+		return "solve failed\n" + msg
+	}
+	return msg
+}
+
+func logMultilineError(msg string) {
+	writeErrorLog(os.Stderr, msg)
 }
 
 func shouldColorStderr() bool {
-	if os.Getenv("NO_COLOR") != "" {
+	return shouldColorOutput(stderrIsTTY(), os.Getenv("TERM"))
+}
+
+func shouldColorOutput(isTTY bool, term string) bool {
+	if os.Getenv("NO_COLOR") != "" || os.Getenv("CLICOLOR") == "0" {
 		return false
 	}
-	term := os.Getenv("TERM")
+	if forceColorEnabled() {
+		return true
+	}
 	if term == "" || term == "dumb" {
 		return false
 	}
+	return isTTY
+}
+
+func forceColorEnabled() bool {
+	return os.Getenv("FORCE_COLOR") != "" || os.Getenv("CLICOLOR_FORCE") != ""
+}
+
+func stderrIsTTY() bool {
 	info, err := os.Stderr.Stat()
 	if err != nil {
 		return false
 	}
 	return (info.Mode() & os.ModeCharDevice) != 0
+}
+
+func writeErrorLog(w io.Writer, msg string) {
+	line := "wire: " + msg
+	if !strings.HasSuffix(line, "\n") {
+		line += "\n"
+	}
+	if shouldColorStderr() {
+		_, _ = io.WriteString(w, colorizeLines(line))
+		return
+	}
+	_, _ = io.WriteString(w, line)
+}
+
+func colorizeLines(s string) string {
+	if s == "" {
+		return ""
+	}
+	parts := strings.SplitAfter(s, "\n")
+	var b strings.Builder
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		b.WriteString(ansiRed)
+		b.WriteString(part)
+		b.WriteString(ansiReset)
+	}
+	return b.String()
 }

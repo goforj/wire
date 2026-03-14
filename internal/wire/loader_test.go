@@ -220,7 +220,7 @@ func TestLoadAndGenerateModuleIncrementalMatches(t *testing.T) {
 	}
 }
 
-func TestGenerateIncrementalManifestSkipsLazyLoadOnBodyOnlyChange(t *testing.T) {
+func TestGenerateIncrementalBodyOnlyChangeFallsBackToLoadAndReusesOutput(t *testing.T) {
 	lockCacheHooks(t)
 	state := saveCacheHooks()
 	t.Cleanup(func() { restoreCacheHooks(state) })
@@ -340,14 +340,116 @@ func TestGenerateIncrementalManifestSkipsLazyLoadOnBodyOnlyChange(t *testing.T) 
 	if len(second) != 1 || len(second[0].Errs) > 0 {
 		t.Fatalf("unexpected second Generate result: %+v", second)
 	}
-	if containsLabel(secondLabels, "generate.load") {
-		t.Fatalf("expected second Generate to hit preload incremental manifest before package load, labels=%v", secondLabels)
-	}
-	if containsLabel(secondLabels, "load.packages.lazy.load") {
-		t.Fatalf("expected second Generate to skip lazy load, labels=%v", secondLabels)
+	if !containsLabel(secondLabels, "generate.load") {
+		t.Fatalf("expected second Generate to re-load packages after body-only change, labels=%v", secondLabels)
 	}
 	if string(first[0].Content) != string(second[0].Content) {
 		t.Fatal("expected body-only change to reuse identical generated output")
+	}
+}
+
+func TestGenerateIncrementalBodyOnlyInvalidChangeDoesNotReusePreloadManifest(t *testing.T) {
+	lockCacheHooks(t)
+	state := saveCacheHooks()
+	t.Cleanup(func() { restoreCacheHooks(state) })
+
+	cacheRoot := t.TempDir()
+	osTempDir = func() string { return cacheRoot }
+
+	repoRoot := mustRepoRoot(t)
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require github.com/goforj/wire v0.0.0",
+		"replace github.com/goforj/wire => " + repoRoot,
+		"",
+	}, "\n"))
+
+	writeFile(t, filepath.Join(root, "app", "wire.go"), strings.Join([]string{
+		"//go:build wireinject",
+		"// +build wireinject",
+		"",
+		"package app",
+		"",
+		"import (",
+		"\t\"example.com/app/dep\"",
+		"\t\"github.com/goforj/wire\"",
+		")",
+		"",
+		"func Init() *dep.Foo {",
+		"\twire.Build(dep.NewSet)",
+		"\treturn nil",
+		"}",
+		"",
+	}, "\n"))
+
+	depFile := filepath.Join(root, "dep", "dep.go")
+	writeFile(t, depFile, strings.Join([]string{
+		"package dep",
+		"",
+		"type Foo struct { Message string }",
+		"",
+		"func NewMessage() string { return \"a\" }",
+		"",
+		"func New(msg string) *Foo {",
+		"\treturn &Foo{Message: msg}",
+		"}",
+		"",
+	}, "\n"))
+
+	writeFile(t, filepath.Join(root, "dep", "wire.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"import \"github.com/goforj/wire\"",
+		"",
+		"var NewSet = wire.NewSet(NewMessage, New)",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "GOWORK=off")
+	ctx := WithIncremental(context.Background(), true)
+
+	first, errs := Generate(ctx, root, env, []string{"./app"}, &GenerateOptions{})
+	if len(errs) > 0 {
+		t.Fatalf("first Generate returned errors: %v", errs)
+	}
+	if len(first) != 1 || len(first[0].Errs) > 0 {
+		t.Fatalf("unexpected first Generate result: %+v", first)
+	}
+
+	writeFile(t, depFile, strings.Join([]string{
+		"package dep",
+		"",
+		"type Foo struct { Message string }",
+		"",
+		"func NewMessage() string { return \"a\" }",
+		"",
+		"func New(msg string) *Foo {",
+		"\treturn missing",
+		"}",
+		"",
+	}, "\n"))
+
+	var secondLabels []string
+	secondCtx := WithTiming(ctx, func(label string, _ time.Duration) {
+		secondLabels = append(secondLabels, label)
+	})
+	second, errs := Generate(secondCtx, root, env, []string{"./app"}, &GenerateOptions{})
+	if len(second) != 0 {
+		t.Fatalf("expected invalid body-only change to stop before generation, got %+v", second)
+	}
+	if len(errs) == 0 {
+		t.Fatal("expected invalid body-only change to return errors")
+	}
+	if !containsLabel(secondLabels, "generate.load") {
+		t.Fatalf("expected invalid body-only change to bypass preload manifest and load packages, labels=%v", secondLabels)
+	}
+	if got := errs[0].Error(); !strings.Contains(got, "undefined: missing") {
+		t.Fatalf("expected load/type-check error from invalid body-only change, got %q", got)
 	}
 }
 
@@ -1077,6 +1179,156 @@ func TestGenerateIncrementalInvalidShapeChangeDoesNotReuseManifest(t *testing.T)
 	}
 	if got := errs[0].Error(); !strings.Contains(got, "type-check failed for example.com/app/app") {
 		t.Fatalf("expected fast-path type-check error, got %q", got)
+	}
+	if _, ok := readIncrementalManifest(incrementalManifestSelectorKey(root, env, []string{"./app"}, &GenerateOptions{})); ok {
+		t.Fatal("expected invalid incremental generate to invalidate selector manifest")
+	}
+}
+
+func TestGenerateIncrementalRecoversAfterInvalidShapeChange(t *testing.T) {
+	lockCacheHooks(t)
+	state := saveCacheHooks()
+	t.Cleanup(func() { restoreCacheHooks(state) })
+
+	cacheRoot := t.TempDir()
+	osTempDir = func() string { return cacheRoot }
+
+	repoRoot := mustRepoRoot(t)
+	root := t.TempDir()
+
+	writeFile(t, filepath.Join(root, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require github.com/goforj/wire v0.0.0",
+		"replace github.com/goforj/wire => " + repoRoot,
+		"",
+	}, "\n"))
+
+	writeFile(t, filepath.Join(root, "app", "wire.go"), strings.Join([]string{
+		"//go:build wireinject",
+		"// +build wireinject",
+		"",
+		"package app",
+		"",
+		"import (",
+		"\t\"example.com/app/dep\"",
+		"\t\"github.com/goforj/wire\"",
+		")",
+		"",
+		"func Init() *dep.Foo {",
+		"\twire.Build(dep.NewSet)",
+		"\treturn nil",
+		"}",
+		"",
+	}, "\n"))
+
+	depFile := filepath.Join(root, "dep", "dep.go")
+	wireFile := filepath.Join(root, "dep", "wire.go")
+	writeFile(t, depFile, strings.Join([]string{
+		"package dep",
+		"",
+		"type Foo struct { Message string }",
+		"",
+		"func NewMessage() string { return \"a\" }",
+		"",
+		"func New(msg string) *Foo {",
+		"\treturn &Foo{Message: msg}",
+		"}",
+		"",
+	}, "\n"))
+	writeFile(t, wireFile, strings.Join([]string{
+		"package dep",
+		"",
+		"import \"github.com/goforj/wire\"",
+		"",
+		"var NewSet = wire.NewSet(NewMessage, New)",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "GOWORK=off")
+	ctx := WithIncremental(context.Background(), true)
+
+	first, errs := Generate(ctx, root, env, []string{"./app"}, &GenerateOptions{})
+	if len(errs) > 0 {
+		t.Fatalf("first Generate returned errors: %v", errs)
+	}
+	if len(first) != 1 || len(first[0].Errs) > 0 {
+		t.Fatalf("unexpected first Generate result: %+v", first)
+	}
+
+	writeFile(t, depFile, strings.Join([]string{
+		"package dep",
+		"",
+		"import \"example.com/app/extra\"",
+		"",
+		"type Foo struct { Message string }",
+		"",
+		"func NewMessage() string { return \"a\" }",
+		"",
+		"func New(msg string) *Foo {",
+		"\treturn &Foo{Message: msg}",
+		"}",
+		"",
+	}, "\n"))
+
+	second, errs := Generate(ctx, root, env, []string{"./app"}, &GenerateOptions{})
+	if len(second) != 0 {
+		t.Fatalf("expected invalid incremental generate to stop before generation, got %+v", second)
+	}
+	if len(errs) == 0 {
+		t.Fatal("expected invalid incremental generate to return errors")
+	}
+	clearIncrementalSessions()
+
+	writeFile(t, depFile, strings.Join([]string{
+		"package dep",
+		"",
+		"type Foo struct { Message string; Count int }",
+		"",
+		"func NewMessage() string { return \"a\" }",
+		"",
+		"func NewCount() int { return 7 }",
+		"",
+		"func New(msg string, count int) *Foo {",
+		"\treturn &Foo{Message: msg, Count: count}",
+		"}",
+		"",
+	}, "\n"))
+	writeFile(t, wireFile, strings.Join([]string{
+		"package dep",
+		"",
+		"import \"github.com/goforj/wire\"",
+		"",
+		"var NewSet = wire.NewSet(NewMessage, NewCount, New)",
+		"",
+	}, "\n"))
+
+	var thirdLabels []string
+	thirdCtx := WithTiming(ctx, func(label string, _ time.Duration) {
+		thirdLabels = append(thirdLabels, label)
+	})
+	third, errs := Generate(thirdCtx, root, env, []string{"./app"}, &GenerateOptions{})
+	if len(errs) > 0 {
+		t.Fatalf("recovery incremental Generate returned errors: %v", errs)
+	}
+	if len(third) != 1 || len(third[0].Errs) > 0 {
+		t.Fatalf("unexpected recovery incremental Generate result: %+v", third)
+	}
+
+	normal, errs := Generate(context.Background(), root, env, []string{"./app"}, &GenerateOptions{})
+	if len(errs) > 0 {
+		t.Fatalf("normal Generate returned errors: %v", errs)
+	}
+	if len(normal) != 1 || len(normal[0].Errs) > 0 {
+		t.Fatalf("unexpected normal Generate result: %+v", normal)
+	}
+	if string(third[0].Content) != string(normal[0].Content) {
+		t.Fatal("incremental output differs from normal Generate output after recovering from invalid shape change")
+	}
+	if !containsLabel(thirdLabels, "generate.load") {
+		t.Fatalf("expected recovery run to fall back to normal load after invalidating stale manifest, labels=%v", thirdLabels)
 	}
 }
 

@@ -414,6 +414,8 @@ func incrementalManifestCurrentLocalPackages(ctx context.Context, local []packag
 				if firstReason == "" {
 					firstReason = fp.PkgPath + ".shape_mismatch"
 				}
+			} else if firstReason == "" {
+				firstReason = fp.PkgPath + ".meta_changed"
 			}
 		}
 		if changed, err := packageDirectoryIntroducedRelevantFiles(fp.Files); err != nil {
@@ -572,6 +574,13 @@ func writeIncrementalManifestFile(key string, manifest *incrementalManifest) {
 	if err := osRename(tmp.Name(), incrementalManifestPath(key)); err != nil {
 		osRemove(tmp.Name())
 	}
+}
+
+func removeIncrementalManifestFile(key string) {
+	if key == "" {
+		return
+	}
+	_ = osRemove(incrementalManifestPath(key))
 }
 
 func encodeIncrementalManifest(manifest *incrementalManifest) ([]byte, error) {

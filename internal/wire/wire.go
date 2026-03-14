@@ -129,6 +129,12 @@ func Generate(ctx context.Context, wd string, env []string, patterns []string, o
 	if len(errs) > 0 {
 		return nil, errs
 	}
+	if err := validateIncrementalTouchedPackages(ctx, wd, opts, preloadState, loader.fingerprints); err != nil {
+		if shouldBypassIncrementalManifestAfterFastPathError(err) {
+			return nil, []error{err}
+		}
+		bypassIncrementalManifest = true
+	}
 	if !bypassIncrementalManifest {
 		if cached, ok := readIncrementalManifestResults(ctx, wd, env, patterns, opts, pkgs, loader.fingerprints); ok {
 			warmPackageOutputCache(pkgs, opts, cached)

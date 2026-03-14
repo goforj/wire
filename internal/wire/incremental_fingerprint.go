@@ -54,6 +54,7 @@ type fingerprintStats struct {
 type incrementalFingerprintSnapshot struct {
 	stats        fingerprintStats
 	changed      []string
+	touched      []string
 	fingerprints map[string]*packageFingerprint
 }
 
@@ -106,6 +107,7 @@ func collectIncrementalFingerprints(wd string, tags string, pkgs []*packages.Pac
 			continue
 		}
 		snapshot.stats.metaMisses++
+		snapshot.touched = append(snapshot.touched, pkg.PkgPath)
 		fp, err := buildPackageFingerprint(wd, tags, pkg, metaFiles)
 		if err != nil {
 			continue
@@ -121,6 +123,7 @@ func collectIncrementalFingerprints(wd string, tags string, pkgs []*packages.Pac
 		snapshot.changed = append(snapshot.changed, pkg.PkgPath)
 	}
 	sort.Strings(snapshot.changed)
+	sort.Strings(snapshot.touched)
 	return snapshot
 }
 
