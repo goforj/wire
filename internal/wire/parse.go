@@ -377,7 +377,7 @@ func load(ctx context.Context, wd string, env []string, tags string, patterns []
 	}
 	baseCfg := &packages.Config{
 		Context:    ctx,
-		Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps,
+		Mode:       baseLoadMode(ctx),
 		Dir:        wd,
 		Env:        env,
 		BuildFlags: []string{"-tags=wireinject"},
@@ -421,6 +421,14 @@ func load(ctx context.Context, wd string, env []string, tags string, patterns []
 		fingerprints: fingerprints,
 	}
 	return pkgs, loader, nil
+}
+
+func baseLoadMode(ctx context.Context) packages.LoadMode {
+	mode := packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports
+	if !incrementalColdBootstrapEnabled(ctx) {
+		mode |= packages.NeedDeps
+	}
+	return mode
 }
 
 func collectLoadErrors(pkgs []*packages.Package) []error {
