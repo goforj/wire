@@ -104,7 +104,7 @@ func outputCacheEnabled(ctx context.Context, wd string, env []string) bool {
 	if effectiveLoaderMode(ctx, wd, env) == loader.ModeFallback {
 		return false
 	}
-	return envValue(env, "WIRE_LOADER_ARTIFACTS") == "1"
+	return envValue(env, "WIRE_LOADER_ARTIFACTS") != "0"
 }
 
 func outputCachePath(env []string, key string) (string, error) {

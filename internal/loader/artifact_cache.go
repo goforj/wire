@@ -34,7 +34,7 @@ const (
 )
 
 func loaderArtifactEnabled(env []string) bool {
-	return envValue(env, loaderArtifactEnv) == "1"
+	return envValue(env, loaderArtifactEnv) != "0"
 }
 
 func loaderArtifactDir(env []string) (string, error) {
