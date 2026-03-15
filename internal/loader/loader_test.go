@@ -15,16 +15,22 @@
 package loader
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"golang.org/x/tools/go/gcexportdata"
 	"golang.org/x/tools/go/packages"
 )
 
@@ -351,6 +357,107 @@ func TestMetaFilesFallsBackToGoFiles(t *testing.T) {
 	}
 }
 
+func TestExportDataPairings(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "lib.go", "package lib\n\ntype T int\n", 0)
+	if err != nil {
+		t.Fatalf("ParseFile() error = %v", err)
+	}
+	pkg, err := new(types.Config).Check("lib", fset, []*ast.File{file}, nil)
+	if err != nil {
+		t.Fatalf("types.Check() error = %v", err)
+	}
+
+	t.Run("gcexportdata write/read direct", func(t *testing.T) {
+		var out bytes.Buffer
+		if err := gcexportdata.Write(&out, fset, pkg); err != nil {
+			t.Fatalf("gcexportdata.Write() error = %v", err)
+		}
+		got, err := gcexportdata.Read(bytes.NewReader(out.Bytes()), token.NewFileSet(), make(map[string]*types.Package), pkg.Path())
+		if err != nil {
+			t.Fatalf("gcexportdata.Read() error = %v", err)
+		}
+		if got.Scope().Lookup("T") == nil {
+			t.Fatal("reimported package missing T")
+		}
+	})
+
+	t.Run("gcexportdata write with newreader fails", func(t *testing.T) {
+		var out bytes.Buffer
+		if err := gcexportdata.Write(&out, fset, pkg); err != nil {
+			t.Fatalf("gcexportdata.Write() error = %v", err)
+		}
+		if _, err := gcexportdata.NewReader(bytes.NewReader(out.Bytes())); err == nil {
+			t.Fatal("gcexportdata.NewReader() unexpectedly succeeded on direct gcexportdata.Write output")
+		}
+	})
+}
+
+func TestExportDataRoundTripWithImports(t *testing.T) {
+	fset := token.NewFileSet()
+	depPkg, err := new(types.Config).Check("example.com/dep", fset, []*ast.File{
+		mustParseFile(t, fset, "dep.go", `package dep
+
+type T int
+`),
+	}, nil)
+	if err != nil {
+		t.Fatalf("types.Check(dep) error = %v", err)
+	}
+	pkg, err := (&types.Config{
+		Importer: importerFuncForTest(func(path string) (*types.Package, error) {
+			if path == "example.com/dep" {
+				return depPkg, nil
+			}
+			if path == "unsafe" {
+				return types.Unsafe, nil
+			}
+			return nil, nil
+		}),
+	}).Check("example.com/lib", fset, []*ast.File{
+		mustParseFile(t, fset, "lib.go", `package lib
+
+import "example.com/dep"
+
+type T struct {
+	S dep.T
+}
+`),
+	}, nil)
+	if err != nil {
+		t.Fatalf("types.Check() error = %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := gcexportdata.Write(&out, fset, pkg); err != nil {
+		t.Fatalf("gcexportdata.Write() error = %v", err)
+	}
+	imports := make(map[string]*types.Package)
+	got, err := gcexportdata.Read(bytes.NewReader(out.Bytes()), token.NewFileSet(), imports, pkg.Path())
+	if err != nil {
+		t.Fatalf("gcexportdata.Read() error = %v", err)
+	}
+	obj := got.Scope().Lookup("T")
+	if obj == nil {
+		t.Fatal("reimported package missing T")
+	}
+	named, ok := obj.Type().(*types.Named)
+	if !ok {
+		t.Fatalf("T type = %T, want *types.Named", obj.Type())
+	}
+	field := named.Underlying().(*types.Struct).Field(0)
+	if field.Type().String() != "example.com/dep.T" {
+		t.Fatalf("field type = %q, want %q", field.Type().String(), "example.com/dep.T")
+	}
+	depImport := imports["example.com/dep"]
+	if depImport == nil {
+		t.Fatal("imports map missing dep")
+	}
+	if depImport.Scope().Lookup("T") == nil {
+		t.Fatal("dep import missing T after import")
+	}
+}
+
 func TestLoadTypedPackageGraphFallback(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.19\n")
@@ -491,6 +598,644 @@ func TestLoadTypedPackageGraphCustomKeepsExternalPackagesLight(t *testing.T) {
 	}
 	if len(fmtPkg.Syntax) != 0 {
 		t.Fatalf("fmt package Syntax len = %d, want 0", len(fmtPkg.Syntax))
+	}
+}
+
+func TestLoadTypedPackageGraphCustomExternalArtifactCache(t *testing.T) {
+	root := t.TempDir()
+	artifactDir := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), "package app\n\nimport \"fmt\"\n\nfunc Init() string { return fmt.Sprint(\"ok\") }\n")
+
+	env := append(os.Environ(),
+		loaderArtifactEnv+"=1",
+		loaderArtifactDirEnv+"="+artifactDir,
+	)
+
+	run := func() int {
+		var parseCalls int
+		l := New()
+		got, err := l.LoadTypedPackageGraph(context.Background(), LazyLoadRequest{
+			WD:         root,
+			Env:        env,
+			Package:    "example.com/app/app",
+			Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax | packages.NeedExportFile,
+			LoaderMode: ModeCustom,
+			Fset:       token.NewFileSet(),
+			ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+				parseCalls++
+				return parser.ParseFile(fset, filename, src, parser.ParseComments|parser.SkipObjectResolution)
+			},
+		})
+		if err != nil {
+			t.Fatalf("LoadTypedPackageGraph(custom) error = %v", err)
+		}
+		rootPkg := got.Packages[0]
+		if rootPkg.Imports["fmt"] == nil {
+			t.Fatal("expected fmt import package")
+		}
+		return parseCalls
+	}
+
+	first := run()
+	entries, err := os.ReadDir(artifactDir)
+	if err != nil {
+		t.Fatalf("ReadDir(%q) error = %v", artifactDir, err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("expected artifact cache files after first run")
+	}
+	second := run()
+	if second >= first {
+		t.Fatalf("second parseCalls = %d, want less than first run %d", second, first)
+	}
+}
+
+func TestLoadTypedPackageGraphCustomExternalArtifactCacheReportsHits(t *testing.T) {
+	root := t.TempDir()
+	artifactDir := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), "package app\n\nimport \"fmt\"\n\nfunc Init() string { return fmt.Sprint(\"ok\") }\n")
+	env := append(os.Environ(),
+		loaderArtifactEnv+"=1",
+		loaderArtifactDirEnv+"="+artifactDir,
+	)
+
+	run := func() []string {
+		var labels []string
+		ctx := WithTiming(context.Background(), func(label string, _ time.Duration) {
+			labels = append(labels, label)
+		})
+		l := New()
+		_, err := l.LoadTypedPackageGraph(ctx, LazyLoadRequest{
+			WD:         root,
+			Env:        env,
+			Package:    "example.com/app/app",
+			Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax | packages.NeedExportFile,
+			LoaderMode: ModeCustom,
+			Fset:       token.NewFileSet(),
+			ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+				return parser.ParseFile(fset, filename, src, parser.ParseComments|parser.SkipObjectResolution)
+			},
+		})
+		if err != nil {
+			t.Fatalf("LoadTypedPackageGraph(custom) error = %v", err)
+		}
+		return labels
+	}
+
+	_ = run()
+	second := run()
+	if !hasPrefixLabel(second, "loader.custom.lazy.artifact_hits=") {
+		t.Fatalf("second run labels missing artifact hit count: %v", second)
+	}
+	if !containsPositiveIntLabel(second, "loader.custom.lazy.artifact_hits=") {
+		t.Fatalf("second run artifact hit count was not positive: %v", second)
+	}
+}
+
+func TestLoadTypedPackageGraphCustomLeafLocalArtifactCache(t *testing.T) {
+	root := t.TempDir()
+	artifactDir := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(root, "dep", "dep.go"), "package dep\n\nfunc Provide() string { return \"ok\" }\n")
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), "package app\n\nimport \"example.com/app/dep\"\n\nfunc Init() string { return dep.Provide() }\n")
+	env := append(os.Environ(),
+		loaderArtifactEnv+"=1",
+		loaderLocalArtifactEnv+"=1",
+		loaderArtifactDirEnv+"="+artifactDir,
+	)
+
+	run := func() int {
+		var parseCalls int
+		l := New()
+		_, err := l.LoadTypedPackageGraph(context.Background(), LazyLoadRequest{
+			WD:         root,
+			Env:        env,
+			Package:    "example.com/app/app",
+			Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax | packages.NeedExportFile,
+			LoaderMode: ModeCustom,
+			Fset:       token.NewFileSet(),
+			ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+				parseCalls++
+				return parser.ParseFile(fset, filename, src, parser.ParseComments|parser.SkipObjectResolution)
+			},
+		})
+		if err != nil {
+			t.Fatalf("LoadTypedPackageGraph(custom) error = %v", err)
+		}
+		return parseCalls
+	}
+
+	first := run()
+	second := run()
+	if second >= first {
+		t.Fatalf("second parseCalls = %d, want less than first run %d", second, first)
+	}
+}
+
+func TestLoadTypedPackageGraphCustomNonLeafLocalArtifactCacheWithoutProviderSets(t *testing.T) {
+	root := t.TempDir()
+	artifactDir := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(root, "leaf", "leaf.go"), "package leaf\n\nfunc Provide() string { return \"ok\" }\n")
+	writeTestFile(t, filepath.Join(root, "dep", "dep.go"), "package dep\n\nimport \"example.com/app/leaf\"\n\nfunc Provide() string { return leaf.Provide() }\n")
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), "package app\n\nimport \"example.com/app/dep\"\n\nfunc Init() string { return dep.Provide() }\n")
+	env := append(os.Environ(),
+		loaderArtifactEnv+"=1",
+		loaderLocalArtifactEnv+"=1",
+		loaderArtifactDirEnv+"="+artifactDir,
+	)
+
+	run := func() int {
+		var parseCalls int
+		l := New()
+		_, err := l.LoadTypedPackageGraph(context.Background(), LazyLoadRequest{
+			WD:         root,
+			Env:        env,
+			Package:    "example.com/app/app",
+			Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax | packages.NeedExportFile,
+			LoaderMode: ModeCustom,
+			Fset:       token.NewFileSet(),
+			ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+				parseCalls++
+				return parser.ParseFile(fset, filename, src, parser.ParseComments|parser.SkipObjectResolution)
+			},
+		})
+		if err != nil {
+			t.Fatalf("LoadTypedPackageGraph(custom) error = %v", err)
+		}
+		return parseCalls
+	}
+
+	first := run()
+	second := run()
+	if second >= first {
+		t.Fatalf("second parseCalls = %d, want less than first run %d", second, first)
+	}
+}
+
+func TestLoadTypedPackageGraphCustomNonLeafLocalArtifactDisabledForProviderSets(t *testing.T) {
+	root := t.TempDir()
+	artifactDir := t.TempDir()
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.19\n\nrequire github.com/goforj/wire v0.0.0\n\nreplace github.com/goforj/wire => "+repoRoot+"\n")
+	writeTestFile(t, filepath.Join(root, "leaf", "leaf.go"), "package leaf\n\nfunc Provide() string { return \"ok\" }\n")
+	writeTestFile(t, filepath.Join(root, "dep", "dep.go"), "package dep\n\nimport (\n\t\"example.com/app/leaf\"\n\t\"github.com/goforj/wire\"\n)\n\nfunc Provide() string { return leaf.Provide() }\n\nvar Set = wire.NewSet(Provide)\n")
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), "package app\n\nimport \"example.com/app/dep\"\n\nfunc Init() string { return dep.Provide() }\n")
+	env := append(os.Environ(),
+		loaderArtifactEnv+"=1",
+		loaderLocalArtifactEnv+"=1",
+		loaderArtifactDirEnv+"="+artifactDir,
+	)
+
+	run := func() int {
+		var parseCalls int
+		l := New()
+		_, err := l.LoadTypedPackageGraph(context.Background(), LazyLoadRequest{
+			WD:         root,
+			Env:        env,
+			Package:    "example.com/app/app",
+			Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax | packages.NeedExportFile,
+			LoaderMode: ModeCustom,
+			Fset:       token.NewFileSet(),
+			ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+				parseCalls++
+				return parser.ParseFile(fset, filename, src, parser.ParseComments|parser.SkipObjectResolution)
+			},
+		})
+		if err != nil {
+			t.Fatalf("LoadTypedPackageGraph(custom) error = %v", err)
+		}
+		return parseCalls
+	}
+
+	first := run()
+	second := run()
+	if second < first-1 {
+		t.Fatalf("second parseCalls = %d, expected provider-set package to stay near first run %d", second, first)
+	}
+	meta, err := runGoList(context.Background(), goListRequest{
+		WD:       root,
+		Env:      env,
+		Patterns: []string{"./app"},
+		NeedDeps: true,
+	})
+	if err != nil {
+		t.Fatalf("runGoList() error = %v", err)
+	}
+	depMeta := meta["example.com/app/dep"]
+	if depMeta == nil {
+		t.Fatal("missing metadata for example.com/app/dep")
+	}
+	hasProviderSets, ok := readLocalArtifactProviderSetFlag(env, depMeta)
+	if ok && !hasProviderSets {
+		t.Fatal("expected provider-set package metadata to record provider sets")
+	}
+}
+
+func TestLoadTypedPackageGraphCustomLocalArtifactDisabledForProviderSetImporter(t *testing.T) {
+	root := t.TempDir()
+	artifactDir := t.TempDir()
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.19\n\nrequire github.com/goforj/wire v0.0.0\n\nreplace github.com/goforj/wire => "+repoRoot+"\n")
+	writeTestFile(t, filepath.Join(root, "jobs", "jobs.go"), "package jobs\n\nfunc Provide() string { return \"ok\" }\n")
+	writeTestFile(t, filepath.Join(root, "cmd", "cmd.go"), "package cmd\n\nimport (\n\t\"example.com/app/jobs\"\n\t\"github.com/goforj/wire\"\n)\n\nvar Set = wire.NewSet(jobs.Provide)\n")
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), "package app\n\nimport _ \"example.com/app/cmd\"\n\nfunc Init() string { return \"ok\" }\n")
+	env := append(os.Environ(),
+		loaderArtifactEnv+"=1",
+		loaderLocalArtifactEnv+"=1",
+		loaderArtifactDirEnv+"="+artifactDir,
+	)
+
+	run := func() (int, []string) {
+		var (
+			parseCalls int
+			labels     []string
+		)
+		ctx := WithTiming(context.Background(), func(label string, _ time.Duration) {
+			labels = append(labels, label)
+		})
+		l := New()
+		_, err := l.LoadTypedPackageGraph(ctx, LazyLoadRequest{
+			WD:         root,
+			Env:        env,
+			Package:    "example.com/app/app",
+			Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax | packages.NeedExportFile,
+			LoaderMode: ModeCustom,
+			Fset:       token.NewFileSet(),
+			ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+				parseCalls++
+				return parser.ParseFile(fset, filename, src, parser.ParseComments|parser.SkipObjectResolution)
+			},
+		})
+		if err != nil {
+			t.Fatalf("LoadTypedPackageGraph(custom) error = %v", err)
+		}
+		return parseCalls, labels
+	}
+
+	_, _ = run()
+	secondCalls, _ := run()
+	if secondCalls < 2 {
+		t.Fatalf("second parseCalls = %d, expected source load for cmd and jobs", secondCalls)
+	}
+}
+
+func TestLoadTypedPackageGraphCustomLocalArtifactDisabledForWireDeclImporter(t *testing.T) {
+	root := t.TempDir()
+	artifactDir := t.TempDir()
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.19\n\nrequire github.com/goforj/wire v0.0.0\n\nreplace github.com/goforj/wire => "+repoRoot+"\n")
+	writeTestFile(t, filepath.Join(root, "jobs", "jobs.go"), "package jobs\n\nfunc Provide() string { return \"ok\" }\n")
+	writeTestFile(t, filepath.Join(root, "cfg", "cfg.go"), "package cfg\n\nimport (\n\t\"example.com/app/jobs\"\n\t\"github.com/goforj/wire\"\n)\n\nvar V = wire.Value(jobs.Provide())\n")
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), "package app\n\nimport _ \"example.com/app/cfg\"\n\nfunc Init() string { return \"ok\" }\n")
+	env := append(os.Environ(),
+		loaderArtifactEnv+"=1",
+		loaderLocalArtifactEnv+"=1",
+		loaderArtifactDirEnv+"="+artifactDir,
+	)
+
+	run := func() int {
+		var parseCalls int
+		l := New()
+		_, err := l.LoadTypedPackageGraph(context.Background(), LazyLoadRequest{
+			WD:         root,
+			Env:        env,
+			Package:    "example.com/app/app",
+			Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax | packages.NeedExportFile,
+			LoaderMode: ModeCustom,
+			Fset:       token.NewFileSet(),
+			ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+				parseCalls++
+				return parser.ParseFile(fset, filename, src, parser.ParseComments|parser.SkipObjectResolution)
+			},
+		})
+		if err != nil {
+			t.Fatalf("LoadTypedPackageGraph(custom) error = %v", err)
+		}
+		return parseCalls
+	}
+
+	first := run()
+	second := run()
+	if second < first-1 {
+		t.Fatalf("second parseCalls = %d, expected source load for cfg and jobs to remain near first run %d", second, first)
+	}
+	meta, err := runGoList(context.Background(), goListRequest{
+		WD:       root,
+		Env:      env,
+		Patterns: []string{"./app"},
+		NeedDeps: true,
+	})
+	if err != nil {
+		t.Fatalf("runGoList() error = %v", err)
+	}
+	cfgMeta := meta["example.com/app/cfg"]
+	if cfgMeta == nil {
+		t.Fatal("missing metadata for example.com/app/cfg")
+	}
+	flags, ok := readLocalArtifactFlags(env, cfgMeta)
+	if ok && !flags.wireDecls {
+		t.Fatal("expected wire decl package metadata to record wire declarations")
+	}
+}
+
+func TestLoadTypedPackageGraphCustomLocalArtifactPreservesImportedPackageName(t *testing.T) {
+	root := t.TempDir()
+	artifactDir := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(root, "models", "models.go"), "package models\n\nfunc NewRepo() string { return \"ok\" }\n")
+	writeTestFile(t, filepath.Join(root, "root", "wire.go"), "package root\n\nimport \"example.com/app/models\"\n\nvar _ = models.NewRepo\n")
+	env := append(os.Environ(),
+		loaderArtifactEnv+"=1",
+		loaderLocalArtifactEnv+"=1",
+		loaderArtifactDirEnv+"="+artifactDir,
+	)
+
+	l := New()
+	load := func() (*LazyLoadResult, error) {
+		return l.LoadTypedPackageGraph(context.Background(), LazyLoadRequest{
+			WD:         root,
+			Env:        env,
+			Package:    "example.com/app/root",
+			Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax | packages.NeedExportFile,
+			LoaderMode: ModeCustom,
+			Fset:       token.NewFileSet(),
+			ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+				return parser.ParseFile(fset, filename, src, parser.ParseComments|parser.SkipObjectResolution)
+			},
+		})
+	}
+
+	first, err := load()
+	if err != nil {
+		t.Fatalf("first LoadTypedPackageGraph(custom) error = %v", err)
+	}
+	second, err := load()
+	if err != nil {
+		t.Fatalf("second LoadTypedPackageGraph(custom) error = %v", err)
+	}
+	firstRoot := collectGraph(first.Packages)["example.com/app/root"]
+	secondRoot := collectGraph(second.Packages)["example.com/app/root"]
+	if firstRoot == nil || secondRoot == nil {
+		t.Fatal("missing root package")
+	}
+	firstModels := firstRoot.Imports["example.com/app/models"]
+	secondModels := secondRoot.Imports["example.com/app/models"]
+	if firstModels == nil || secondModels == nil {
+		t.Fatal("missing imported models package")
+	}
+	if firstModels.Types == nil || secondModels.Types == nil {
+		t.Fatal("expected imported models package to be typed")
+	}
+	if firstModels.Types.Name() != "models" {
+		t.Fatalf("first imported package name = %q, want %q", firstModels.Types.Name(), "models")
+	}
+	if secondModels.Types.Name() != "models" {
+		t.Fatalf("second imported package name = %q, want %q", secondModels.Types.Name(), "models")
+	}
+}
+
+func TestLoadTypedPackageGraphCustomRealAppDirectImporterBoundarySelectors(t *testing.T) {
+	root := os.Getenv("WIRE_REAL_APP_ROOT")
+	if root == "" {
+		t.Skip("WIRE_REAL_APP_ROOT not set")
+	}
+	artifactDir := t.TempDir()
+	env := append(os.Environ(),
+		loaderArtifactEnv+"=1",
+		loaderLocalArtifactEnv+"=1",
+		loaderArtifactDirEnv+"="+artifactDir,
+		"WIRE_LOADER_LOCAL_BOUNDARY=direct_importers",
+	)
+	load := func() (*LazyLoadResult, error) {
+		l := New()
+		return l.LoadTypedPackageGraph(context.Background(), LazyLoadRequest{
+			WD:         root,
+			Env:        env,
+			Package:    "test/wire",
+			Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax | packages.NeedExportFile,
+			LoaderMode: ModeCustom,
+			Fset:       token.NewFileSet(),
+			ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+				return parser.ParseFile(fset, filename, src, parser.ParseComments|parser.SkipObjectResolution)
+			},
+		})
+	}
+	if _, err := load(); err != nil {
+		t.Fatalf("warm LoadTypedPackageGraph(custom) error = %v", err)
+	}
+	got, err := load()
+	if err != nil {
+		t.Fatalf("second LoadTypedPackageGraph(custom) error = %v", err)
+	}
+	graph := collectGraph(got.Packages)
+	rootPkg := graph["test/wire"]
+	if rootPkg == nil {
+		t.Fatal("missing root package test/wire")
+	}
+	checkSelector := func(fileSuffix, pkgIdentName string) {
+		t.Helper()
+		var targetFile *ast.File
+		for _, f := range rootPkg.Syntax {
+			name := rootPkg.Fset.File(f.Pos()).Name()
+			if strings.HasSuffix(name, fileSuffix) {
+				targetFile = f
+				break
+			}
+		}
+		if targetFile == nil {
+			t.Fatalf("missing syntax file %s", fileSuffix)
+		}
+		found := false
+		ast.Inspect(targetFile, func(node ast.Node) bool {
+			sel, ok := node.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			pkgIdent, ok := sel.X.(*ast.Ident)
+			if !ok || pkgIdent.Name != pkgIdentName {
+				return true
+			}
+			found = true
+			pkgObj, ok := rootPkg.TypesInfo.ObjectOf(pkgIdent).(*types.PkgName)
+			if !ok || pkgObj == nil {
+				var importBindings []string
+				for _, spec := range targetFile.Imports {
+					obj := rootPkg.TypesInfo.Implicits[spec]
+					path, _ := strconv.Unquote(spec.Path.Value)
+					name := "<default>"
+					if spec.Name != nil {
+						name = spec.Name.Name
+					}
+					switch typed := obj.(type) {
+					case *types.PkgName:
+						importBindings = append(importBindings, fmt.Sprintf("%s=>%s(%s)", name, typed.Imported().Path(), typed.Imported().Name()))
+					case nil:
+						importBindings = append(importBindings, fmt.Sprintf("%s=>nil[%s]", name, path))
+					default:
+						importBindings = append(importBindings, fmt.Sprintf("%s=>%T[%s]", name, obj, path))
+					}
+				}
+				importPath := ""
+				for _, spec := range targetFile.Imports {
+					path, _ := strconv.Unquote(spec.Path.Value)
+					name := filepath.Base(path)
+					if spec.Name != nil {
+						name = spec.Name.Name
+					}
+					if name == pkgIdentName {
+						importPath = path
+						break
+					}
+				}
+				var depSummary string
+				if importPath != "" {
+					if dep := graph[importPath]; dep != nil {
+						depSummary = fmt.Sprintf("dep=%s name=%q types=%v typeName=%q errors=%v", importPath, dep.Name, dep.Types != nil, func() string {
+							if dep.Types == nil {
+								return ""
+							}
+							return dep.Types.Name()
+						}(), dep.Errors)
+					} else {
+						depSummary = "dep_missing=" + importPath
+					}
+				}
+				t.Fatalf("%s selector lost package object for %s; imports=%s; importPath=%q; %s; root errors=%v", fileSuffix, pkgIdentName, strings.Join(importBindings, ", "), importPath, depSummary, rootPkg.Errors)
+			}
+			if rootPkg.TypesInfo.ObjectOf(sel.Sel) == nil {
+				t.Fatalf("%s selector lost object for %s.%s", fileSuffix, pkgIdentName, sel.Sel.Name)
+			}
+			return false
+		})
+		if !found {
+			t.Fatalf("did not find selector using %s in %s", pkgIdentName, fileSuffix)
+		}
+	}
+	checkSelector("inject_repositories.go", "models")
+	checkSelector("inject_http.go", "http")
+	if len(rootPkg.Errors) > 0 {
+		var msgs []string
+		for _, err := range rootPkg.Errors {
+			msgs = append(msgs, err.Msg)
+		}
+		t.Fatalf("root package has errors under direct importer boundary: %s", strings.Join(msgs, "; "))
+	}
+	for _, p := range []string{"test/internal/models", "test/internal/http"} {
+		dep := graph[p]
+		if dep == nil {
+			t.Fatalf("missing dependency package %s", p)
+		}
+		if dep.Types == nil {
+			t.Fatalf("dependency %s missing types", p)
+		}
+		if dep.Name == "" || dep.Types.Name() == "" {
+			t.Fatalf("dependency %s missing package name", p)
+		}
+		if dep.Name != dep.Types.Name() {
+			t.Fatalf("dependency %s package name mismatch: pkg=%q types=%q", p, dep.Name, dep.Types.Name())
+		}
+	}
+	_ = fmt.Sprintf
+}
+
+func TestLoadTypedPackageGraphCustomExternalArtifactCacheRealAppParity(t *testing.T) {
+	root := os.Getenv("WIRE_REAL_APP_ROOT")
+	if root == "" {
+		t.Skip("WIRE_REAL_APP_ROOT not set")
+	}
+	artifactDir := t.TempDir()
+	load := func(env []string) (map[string]*packages.Package, error) {
+		l := New()
+		got, err := l.LoadPackages(context.Background(), PackageLoadRequest{
+			WD:         root,
+			Env:        env,
+			Patterns:   []string{"."},
+			Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax | packages.NeedExportFile,
+			LoaderMode: ModeCustom,
+			Fset:       token.NewFileSet(),
+			ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+				return parser.ParseFile(fset, filename, src, parser.ParseComments|parser.SkipObjectResolution)
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+		return collectGraph(got.Packages), nil
+	}
+
+	base, err := load(os.Environ())
+	if err != nil {
+		t.Fatalf("base load error = %v", err)
+	}
+	withArtifactsEnv := append(os.Environ(),
+		loaderArtifactEnv+"=1",
+		loaderArtifactDirEnv+"="+artifactDir,
+	)
+	firstArtifact, err := load(withArtifactsEnv)
+	if err != nil {
+		t.Fatalf("first artifact load error = %v", err)
+	}
+	secondArtifact, err := load(withArtifactsEnv)
+	if err != nil {
+		t.Fatalf("second artifact load error = %v", err)
+	}
+	if len(base) != len(firstArtifact) {
+		t.Fatalf("first artifact graph size = %d, want %d", len(firstArtifact), len(base))
+	}
+	if len(base) != len(secondArtifact) {
+		var missing []string
+		for path := range base {
+			if secondArtifact[path] == nil {
+				missing = append(missing, path)
+			}
+		}
+		sort.Strings(missing)
+		parents := make(map[string][]string)
+		for parentPath, pkg := range base {
+			for impPath := range pkg.Imports {
+				if secondArtifact[impPath] == nil {
+					parents[impPath] = append(parents[impPath], parentPath)
+				}
+			}
+		}
+		parentSummary := make([]string, 0, 5)
+		for _, path := range missing {
+			if len(parentSummary) == 5 {
+				break
+			}
+			importers := append([]string(nil), parents[path]...)
+			sort.Strings(importers)
+			if len(importers) > 3 {
+				importers = importers[:3]
+			}
+			parentSummary = append(parentSummary, path+" <- "+strings.Join(importers, ","))
+		}
+		if len(missing) > 20 {
+			missing = missing[:20]
+		}
+		secondParent := secondArtifact["github.com/shirou/gopsutil/v4/internal/common"]
+		secondParentImports := []string(nil)
+		if secondParent != nil {
+			secondParentImports = sortedImportPaths(secondParent.Imports)
+		}
+		internalCommonParents := append([]string(nil), parents["github.com/shirou/gopsutil/v4/internal/common"]...)
+		sort.Strings(internalCommonParents)
+		t.Fatalf("second artifact graph size = %d, want %d; missing sample=%v; parent sample=%v; gopsutil/internal/common parents=%v; gopsutil/internal/common imports on second run=%v", len(secondArtifact), len(base), missing, parentSummary, internalCommonParents, secondParentImports)
+	}
+	if compiledFileCount(base) != compiledFileCount(secondArtifact) {
+		t.Fatalf("second artifact compiled file count = %d, want %d", compiledFileCount(secondArtifact), compiledFileCount(base))
 	}
 }
 
@@ -702,6 +1447,14 @@ func collectGraph(roots []*packages.Package) map[string]*packages.Package {
 	return out
 }
 
+func compiledFileCount(pkgs map[string]*packages.Package) int {
+	total := 0
+	for _, pkg := range pkgs {
+		total += len(pkg.CompiledGoFiles)
+	}
+	return total
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -737,6 +1490,21 @@ func sortedImportPaths(m map[string]*packages.Package) []string {
 	return out
 }
 
+type importerFuncForTest func(string) (*types.Package, error)
+
+func (f importerFuncForTest) Import(path string) (*types.Package, error) {
+	return f(path)
+}
+
+func mustParseFile(t *testing.T, fset *token.FileSet, filename, src string) *ast.File {
+	t.Helper()
+	file, err := parser.ParseFile(fset, filename, src, parser.ParseComments|parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("ParseFile(%q) error = %v", filename, err)
+	}
+	return file
+}
+
 func normalizePathForCompare(path string) string {
 	if path == "" {
 		return ""
@@ -769,6 +1537,29 @@ func comparableErrors(errs []packages.Error) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func hasPrefixLabel(labels []string, prefix string) bool {
+	for _, label := range labels {
+		if strings.HasPrefix(label, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsPositiveIntLabel(labels []string, prefix string) bool {
+	for _, label := range labels {
+		if !strings.HasPrefix(label, prefix) {
+			continue
+		}
+		value := strings.TrimPrefix(label, prefix)
+		n, err := strconv.Atoi(value)
+		if err == nil && n > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeErrorPos(pos string) string {

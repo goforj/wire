@@ -68,35 +68,45 @@ type customValidator struct {
 }
 
 type customTypedGraphLoader struct {
-	workspace string
-	ctx       context.Context
-	fset      *token.FileSet
-	meta      map[string]*packageMeta
-	targets   map[string]struct{}
-	parseFile ParseFileFunc
-	packages  map[string]*packages.Package
-	typesPkgs map[string]*types.Package
-	importer  types.Importer
-	loading   map[string]bool
-	stats     typedLoadStats
+	workspace         string
+	ctx               context.Context
+	env               []string
+	fset              *token.FileSet
+	meta              map[string]*packageMeta
+	targets           map[string]struct{}
+	parseFile         ParseFileFunc
+	packages          map[string]*packages.Package
+	typesPkgs         map[string]*types.Package
+	importer          types.Importer
+	loading           map[string]bool
+	isLocalCache      map[string]bool
+	stats             typedLoadStats
 }
 
 type typedLoadStats struct {
-	read              time.Duration
-	parse             time.Duration
-	typecheck         time.Duration
-	localRead         time.Duration
-	externalRead      time.Duration
-	localParse        time.Duration
-	externalParse     time.Duration
-	localTypecheck    time.Duration
-	externalTypecheck time.Duration
-	filesRead         int
-	packages          int
-	localPackages     int
-	externalPackages  int
-	localFilesRead    int
-	externalFilesRead int
+	read               time.Duration
+	parse              time.Duration
+	typecheck          time.Duration
+	localRead          time.Duration
+	externalRead       time.Duration
+	localParse         time.Duration
+	externalParse      time.Duration
+	localTypecheck     time.Duration
+	externalTypecheck  time.Duration
+	filesRead          int
+	packages           int
+	localPackages      int
+	externalPackages   int
+	localFilesRead     int
+	externalFilesRead  int
+	artifactRead       time.Duration
+	artifactPath       time.Duration
+	artifactDecode     time.Duration
+	artifactImportLink time.Duration
+	artifactWrite      time.Duration
+	artifactHits       int
+	artifactMisses     int
+	artifactWrites     int
 }
 
 func validateTouchedPackagesCustom(ctx context.Context, req TouchedValidationRequest) (*TouchedValidationResult, error) {
@@ -195,8 +205,8 @@ func loadRootGraphCustom(ctx context.Context, req RootLoadRequest) (*RootLoadRes
 	}
 	sort.Slice(roots, func(i, j int) bool { return roots[i].PkgPath < roots[j].PkgPath })
 	return &RootLoadResult{
-		Packages: roots,
-		Backend:  ModeCustom,
+		Packages:  roots,
+		Backend:   ModeCustom,
 		Discovery: discoverySnapshotForMeta(meta, req.NeedDeps),
 	}, nil
 }
@@ -235,16 +245,19 @@ func loadTypedPackageGraphCustom(ctx context.Context, req LazyLoadRequest) (*Laz
 		fset = token.NewFileSet()
 	}
 	l := &customTypedGraphLoader{
-		workspace: detectModuleRoot(req.WD),
-		ctx:       ctx,
-		fset:      fset,
-		meta:      meta,
-		targets:   map[string]struct{}{req.Package: {}},
-		parseFile: req.ParseFile,
-		packages:  make(map[string]*packages.Package, len(meta)),
-		typesPkgs: make(map[string]*types.Package, len(meta)),
-		importer:  importerpkg.ForCompiler(token.NewFileSet(), "gc", nil),
-		loading:   make(map[string]bool, len(meta)),
+		workspace:         detectModuleRoot(req.WD),
+		ctx:               ctx,
+		env:               append([]string(nil), req.Env...),
+		fset:              fset,
+		meta:              meta,
+		targets:           map[string]struct{}{req.Package: {}},
+		parseFile:         req.ParseFile,
+		packages:          make(map[string]*packages.Package, len(meta)),
+		typesPkgs:         make(map[string]*types.Package, len(meta)),
+		importer:          importerpkg.ForCompiler(token.NewFileSet(), "gc", nil),
+		loading:           make(map[string]bool, len(meta)),
+		isLocalCache:      make(map[string]bool, len(meta)),
+		stats:             typedLoadStats{},
 	}
 	root, err := l.loadPackage(req.Package)
 	if err != nil {
@@ -259,6 +272,14 @@ func loadTypedPackageGraphCustom(ctx context.Context, req LazyLoadRequest) (*Laz
 	logDuration(ctx, "loader.custom.lazy.parse_files.external.cumulative", l.stats.externalParse)
 	logDuration(ctx, "loader.custom.lazy.typecheck.local.cumulative", l.stats.localTypecheck)
 	logDuration(ctx, "loader.custom.lazy.typecheck.external.cumulative", l.stats.externalTypecheck)
+	logDuration(ctx, "loader.custom.lazy.artifact_read", l.stats.artifactRead)
+	logDuration(ctx, "loader.custom.lazy.artifact_path", l.stats.artifactPath)
+	logDuration(ctx, "loader.custom.lazy.artifact_decode", l.stats.artifactDecode)
+	logDuration(ctx, "loader.custom.lazy.artifact_import_link", l.stats.artifactImportLink)
+	logDuration(ctx, "loader.custom.lazy.artifact_write", l.stats.artifactWrite)
+	logInt(ctx, "loader.custom.lazy.artifact_hits", l.stats.artifactHits)
+	logInt(ctx, "loader.custom.lazy.artifact_misses", l.stats.artifactMisses)
+	logInt(ctx, "loader.custom.lazy.artifact_writes", l.stats.artifactWrites)
 	return &LazyLoadResult{
 		Packages: []*packages.Package{root},
 		Backend:  ModeCustom,
@@ -294,16 +315,19 @@ func loadPackagesCustom(ctx context.Context, req PackageLoadRequest) (*PackageLo
 		return nil, unsupportedError{reason: "no root packages from metadata"}
 	}
 	l := &customTypedGraphLoader{
-		workspace: detectModuleRoot(req.WD),
-		ctx:       ctx,
-		fset:      fset,
-		meta:      meta,
-		targets:   targets,
-		parseFile: req.ParseFile,
-		packages:  make(map[string]*packages.Package, len(meta)),
-		typesPkgs: make(map[string]*types.Package, len(meta)),
-		importer:  importerpkg.ForCompiler(token.NewFileSet(), "gc", nil),
-		loading:   make(map[string]bool, len(meta)),
+		workspace:         detectModuleRoot(req.WD),
+		ctx:               ctx,
+		env:               append([]string(nil), req.Env...),
+		fset:              fset,
+		meta:              meta,
+		targets:           targets,
+		parseFile:         req.ParseFile,
+		packages:          make(map[string]*packages.Package, len(meta)),
+		typesPkgs:         make(map[string]*types.Package, len(meta)),
+		importer:          importerpkg.ForCompiler(token.NewFileSet(), "gc", nil),
+		loading:           make(map[string]bool, len(meta)),
+		isLocalCache:      make(map[string]bool, len(meta)),
+		stats:             typedLoadStats{},
 	}
 	roots := make([]*packages.Package, 0, len(targets))
 	for _, m := range meta {
@@ -326,6 +350,14 @@ func loadPackagesCustom(ctx context.Context, req PackageLoadRequest) (*PackageLo
 	logDuration(ctx, "loader.custom.typed.parse_files.external.cumulative", l.stats.externalParse)
 	logDuration(ctx, "loader.custom.typed.typecheck.local.cumulative", l.stats.localTypecheck)
 	logDuration(ctx, "loader.custom.typed.typecheck.external.cumulative", l.stats.externalTypecheck)
+	logDuration(ctx, "loader.custom.typed.artifact_read", l.stats.artifactRead)
+	logDuration(ctx, "loader.custom.typed.artifact_path", l.stats.artifactPath)
+	logDuration(ctx, "loader.custom.typed.artifact_decode", l.stats.artifactDecode)
+	logDuration(ctx, "loader.custom.typed.artifact_import_link", l.stats.artifactImportLink)
+	logDuration(ctx, "loader.custom.typed.artifact_write", l.stats.artifactWrite)
+	logInt(ctx, "loader.custom.typed.artifact_hits", l.stats.artifactHits)
+	logInt(ctx, "loader.custom.typed.artifact_misses", l.stats.artifactMisses)
+	logInt(ctx, "loader.custom.typed.artifact_writes", l.stats.artifactWrites)
 	return &PackageLoadResult{
 		Packages: roots,
 		Backend:  ModeCustom,
@@ -435,30 +467,51 @@ func (v *customValidator) validatePackage(path string) (*packages.Package, error
 }
 
 func (l *customTypedGraphLoader) loadPackage(path string) (*packages.Package, error) {
-	if pkg := l.packages[path]; pkg != nil && (pkg.Types != nil || len(pkg.Errors) > 0) {
+	if path == "C" {
+		if pkg := l.packages[path]; pkg != nil {
+			return pkg, nil
+		}
+		tpkg := l.typesPkgs[path]
+		if tpkg == nil {
+			tpkg = types.NewPackage("C", "C")
+			l.typesPkgs[path] = tpkg
+		}
+		pkg := &packages.Package{
+			ID:      "C",
+			Name:    "C",
+			PkgPath: "C",
+			Fset:    l.fset,
+			Imports: make(map[string]*packages.Package),
+			Types:   tpkg,
+		}
+		l.packages[path] = pkg
 		return pkg, nil
 	}
 	meta := l.meta[path]
 	if meta == nil {
-		return nil, unsupportedError{reason: "missing lazy-load metadata"}
+		return nil, unsupportedError{reason: "missing lazy-load metadata for " + path}
 	}
+	pkg := l.packages[path]
 	if l.loading[path] {
-		if pkg := l.packages[path]; pkg != nil {
+		if pkg != nil {
 			return pkg, nil
 		}
 		return nil, unsupportedError{reason: "lazy-load cycle"}
 	}
+	if pkg != nil && (pkg.Types != nil || len(pkg.Errors) > 0) {
+		return pkg, nil
+	}
 	l.loading[path] = true
 	defer delete(l.loading, path)
 	l.stats.packages++
-	isLocal := isWorkspacePackage(l.workspace, meta.Dir)
+	_, isTarget := l.targets[path]
+	isLocal := l.isLocalPackage(path, meta)
 	if isLocal {
 		l.stats.localPackages++
 	} else {
 		l.stats.externalPackages++
 	}
 
-	pkg := l.packages[path]
 	if pkg == nil {
 		pkg = &packages.Package{
 			ID:              meta.ImportPath,
@@ -471,6 +524,28 @@ func (l *customTypedGraphLoader) loadPackage(path string) (*packages.Package, er
 			ExportFile:      meta.Export,
 		}
 		l.packages[path] = pkg
+	}
+	useArtifact := loaderArtifactEnabled(l.env) && !isTarget && !isLocal
+	if useArtifact {
+		if typed, ok := l.readArtifact(path, meta, isLocal); ok {
+			linkStart := time.Now()
+			for _, imp := range meta.Imports {
+				target := imp
+				if mapped := meta.ImportMap[imp]; mapped != "" {
+					target = mapped
+				}
+				dep, err := l.loadPackage(target)
+				if err != nil {
+					return nil, err
+				}
+				pkg.Imports[imp] = dep
+			}
+			l.stats.artifactImportLink += time.Since(linkStart)
+			pkg.Types = typed
+			pkg.TypesInfo = nil
+			pkg.Syntax = nil
+			return pkg, nil
+		}
 	}
 	files, parseErrs := l.parseFiles(metaFiles(meta), isLocal)
 	pkg.Errors = append(pkg.Errors, parseErrs...)
@@ -486,12 +561,11 @@ func (l *customTypedGraphLoader) loadPackage(path string) (*packages.Package, er
 	}
 
 	tpkg := l.typesPkgs[path]
-	if tpkg == nil {
+	if tpkg == nil || tpkg.Complete() || (tpkg.Scope() != nil && len(tpkg.Scope().Names()) > 0) {
 		tpkg = types.NewPackage(meta.ImportPath, meta.Name)
 		l.typesPkgs[path] = tpkg
 	}
-	_, isTarget := l.targets[path]
-	needFullState := isTarget || isWorkspacePackage(l.workspace, meta.Dir)
+	needFullState := isTarget || isLocal
 	var info *types.Info
 	if needFullState {
 		info = &types.Info{
@@ -506,7 +580,7 @@ func (l *customTypedGraphLoader) loadPackage(path string) (*packages.Package, er
 	var typeErrors []packages.Error
 	cfg := &types.Config{
 		Sizes:            types.SizesFor("gc", runtime.GOARCH),
-		IgnoreFuncBodies: !isWorkspacePackage(l.workspace, meta.Dir),
+		IgnoreFuncBodies: !isLocal,
 		Importer: importerFunc(func(importPath string) (*types.Package, error) {
 			if importPath == "unsafe" {
 				return types.Unsafe, nil
@@ -537,7 +611,7 @@ func (l *customTypedGraphLoader) loadPackage(path string) (*packages.Package, er
 	}
 	checker := types.NewChecker(cfg, l.fset, tpkg, info)
 	typecheckStart := time.Now()
-	if err := checker.Files(files); err != nil && len(typeErrors) == 0 {
+	if err := l.checkFiles(path, checker, files); err != nil && len(typeErrors) == 0 {
 		typeErrors = append(typeErrors, toPackagesError(l.fset, err))
 	}
 	typecheckDuration := time.Since(typecheckStart)
@@ -555,7 +629,82 @@ func (l *customTypedGraphLoader) loadPackage(path string) (*packages.Package, er
 	pkg.Types = tpkg
 	pkg.TypesInfo = info
 	pkg.Errors = append(pkg.Errors, typeErrors...)
+	if shouldWriteArtifact(l.env, isTarget, isLocal) && len(pkg.Errors) == 0 {
+		_ = l.writeArtifact(meta, tpkg, isLocal)
+	}
 	return pkg, nil
+}
+
+func (l *customTypedGraphLoader) checkFiles(path string, checker *types.Checker, files []*ast.File) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = unsupportedError{reason: fmt.Sprintf("typecheck panic in %s: %v", path, r)}
+		}
+	}()
+	return checker.Files(files)
+}
+
+func (l *customTypedGraphLoader) readArtifact(path string, meta *packageMeta, isLocal bool) (*types.Package, bool) {
+	start := time.Now()
+	pathStart := time.Now()
+	artifactPath, err := loaderArtifactPath(l.env, meta, isLocal)
+	l.stats.artifactPath += time.Since(pathStart)
+	if err != nil {
+		l.stats.artifactRead += time.Since(start)
+		l.stats.artifactMisses++
+		return nil, false
+	}
+	var tpkg *types.Package
+	decodeStart := time.Now()
+	tpkg, err = readLoaderArtifact(artifactPath, l.fset, l.typesPkgs, path)
+	l.stats.artifactDecode += time.Since(decodeStart)
+	if err != nil {
+		l.stats.artifactRead += time.Since(start)
+		l.stats.artifactMisses++
+		return nil, false
+	}
+	l.stats.artifactRead += time.Since(start)
+	l.stats.artifactHits++
+	l.typesPkgs[path] = tpkg
+	return tpkg, true
+}
+
+func (l *customTypedGraphLoader) writeArtifact(meta *packageMeta, pkg *types.Package, isLocal bool) error {
+	start := time.Now()
+	artifactPath, err := loaderArtifactPath(l.env, meta, isLocal)
+	if err != nil {
+		l.stats.artifactWrite += time.Since(start)
+		return err
+	}
+	if artifactUpToDate(l.env, artifactPath, meta, isLocal) {
+		l.stats.artifactWrite += time.Since(start)
+		return nil
+	}
+	writeErr := writeLoaderArtifact(artifactPath, l.fset, pkg)
+	l.stats.artifactWrite += time.Since(start)
+	if writeErr == nil {
+		l.stats.artifactWrites++
+	}
+	if writeErr != nil {
+		return writeErr
+	}
+	return nil
+}
+
+func shouldWriteArtifact(env []string, isTarget, isLocal bool) bool {
+	if !loaderArtifactEnabled(env) || isTarget || isLocal {
+		return false
+	}
+	return true
+}
+
+func (l *customTypedGraphLoader) isLocalPackage(importPath string, meta *packageMeta) bool {
+	if local, ok := l.isLocalCache[importPath]; ok {
+		return local
+	}
+	local := isWorkspacePackage(l.workspace, meta.Dir)
+	l.isLocalCache[importPath] = local
+	return local
 }
 
 func (v *customValidator) importFromExport(path string) (*types.Package, error) {
@@ -907,8 +1056,6 @@ func isWorkspacePackage(workspaceRoot, dir string) bool {
 	if workspaceRoot == "" || dir == "" {
 		return false
 	}
-	workspaceRoot = canonicalLoaderPath(workspaceRoot)
-	dir = canonicalLoaderPath(dir)
 	if dir == workspaceRoot {
 		return true
 	}
@@ -969,7 +1116,6 @@ func envValue(env []string, key string) string {
 	}
 	return ""
 }
-
 
 func touchedPackageStub(fset *token.FileSet, meta *packageMeta) *packages.Package {
 	if meta == nil {

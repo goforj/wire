@@ -186,6 +186,10 @@ func withTiming(ctx context.Context, enabled bool) context.Context {
 		return ctx
 	}
 	return wire.WithTiming(ctx, func(label string, dur time.Duration) {
+		if dur == 0 && strings.Contains(label, "=") {
+			log.Printf("timing: %s", label)
+			return
+		}
 		log.Printf("timing: %s=%s", label, dur)
 	})
 }

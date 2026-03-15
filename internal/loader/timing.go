@@ -2,6 +2,8 @@ package loader
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"time"
 )
 
@@ -38,4 +40,17 @@ func logDuration(ctx context.Context, label string, d time.Duration) {
 	if t := timing(ctx); t != nil {
 		t(label, d)
 	}
+}
+
+func logInt(ctx context.Context, label string, v int) {
+	if t := timing(ctx); t != nil {
+		t(fmt.Sprintf("%s=%d", label, v), 0)
+	}
+}
+
+func debugf(ctx context.Context, format string, args ...interface{}) {
+	if timing(ctx) == nil {
+		return
+	}
+	log.Printf("timing: "+format, args...)
 }

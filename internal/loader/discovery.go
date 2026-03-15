@@ -73,6 +73,7 @@ func runGoList(ctx context.Context, req goListRequest) (map[string]*packageMeta,
 		if meta.ImportPath == "" {
 			continue
 		}
+		meta.Dir = canonicalLoaderPath(meta.Dir)
 		for i, name := range meta.GoFiles {
 			if !filepath.IsAbs(name) {
 				meta.GoFiles[i] = filepath.Join(meta.Dir, name)

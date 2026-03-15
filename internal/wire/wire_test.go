@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"unicode"
@@ -218,6 +219,120 @@ func TestGenerateResultCommitWithStatus(t *testing.T) {
 	if wrote {
 		t.Fatal("expected second CommitWithStatus call to report unchanged")
 	}
+}
+
+func TestGenerateRealAppArtifactParity(t *testing.T) {
+	root := os.Getenv("WIRE_REAL_APP_ROOT")
+	if root == "" {
+		t.Skip("WIRE_REAL_APP_ROOT not set")
+	}
+	artifactDir := t.TempDir()
+	ctx := context.Background()
+
+	run := func(env []string) ([]GenerateResult, []string) {
+		t.Helper()
+		gens, errs := Generate(ctx, root, env, []string{"."}, &GenerateOptions{})
+		errStrings := make([]string, len(errs))
+		for i, err := range errs {
+			errStrings[i] = err.Error()
+		}
+		sort.Strings(errStrings)
+		return gens, errStrings
+	}
+
+	baseGens, baseErrs := run(os.Environ())
+	artifactEnv := append(os.Environ(),
+		"WIRE_LOADER_ARTIFACTS=1",
+		"WIRE_LOADER_ARTIFACT_DIR="+artifactDir,
+	)
+	_, warmErrs := run(artifactEnv)
+	if diff := cmp.Diff(baseErrs, warmErrs); diff != "" {
+		t.Fatalf("artifact warm-up errors mismatch (-base +warm):\n%s", diff)
+	}
+	artifactGens, artifactErrs := run(artifactEnv)
+	if diff := cmp.Diff(baseErrs, artifactErrs); diff != "" {
+		t.Fatalf("artifact errors mismatch (-base +artifact):\n%s", diff)
+	}
+	if len(baseGens) != len(artifactGens) {
+		t.Fatalf("generated file count = %d, want %d", len(artifactGens), len(baseGens))
+	}
+	for i := range baseGens {
+		if baseGens[i].PkgPath != artifactGens[i].PkgPath {
+			t.Fatalf("generated package[%d] = %q, want %q", i, artifactGens[i].PkgPath, baseGens[i].PkgPath)
+		}
+		if diff := cmp.Diff(string(baseGens[i].Content), string(artifactGens[i].Content)); diff != "" {
+			t.Fatalf("generated content mismatch for %q (-base +artifact):\n%s", baseGens[i].PkgPath, diff)
+		}
+		baseGenErrs := comparableGenerateErrors(baseGens[i].Errs)
+		artifactGenErrs := comparableGenerateErrors(artifactGens[i].Errs)
+		if diff := cmp.Diff(baseGenErrs, artifactGenErrs); diff != "" {
+			t.Fatalf("generate errs mismatch for %q (-base +artifact):\n%s", baseGens[i].PkgPath, diff)
+		}
+	}
+}
+
+func TestGenerateRealAppSelfOnlyArtifactParity(t *testing.T) {
+	root := os.Getenv("WIRE_REAL_APP_ROOT")
+	if root == "" {
+		t.Skip("WIRE_REAL_APP_ROOT not set")
+	}
+	artifactDir := t.TempDir()
+	ctx := context.Background()
+
+	run := func(env []string) ([]GenerateResult, []string) {
+		t.Helper()
+		gens, errs := Generate(ctx, root, env, []string{"."}, &GenerateOptions{})
+		errStrings := make([]string, len(errs))
+		for i, err := range errs {
+			errStrings[i] = err.Error()
+		}
+		sort.Strings(errStrings)
+		return gens, errStrings
+	}
+
+	artifactEnv := append(os.Environ(),
+		"WIRE_LOADER_ARTIFACTS=1",
+		"WIRE_LOADER_LOCAL_ARTIFACTS=1",
+		"WIRE_LOADER_ARTIFACT_DIR="+artifactDir,
+	)
+	_, warmErrs := run(artifactEnv)
+	if len(warmErrs) > 0 {
+		t.Fatalf("artifact warm-up errors: %v", warmErrs)
+	}
+	baseGens, baseErrs := run(artifactEnv)
+
+	selfOnlyEnv := append(append([]string(nil), artifactEnv...),
+		"WIRE_LOADER_LOCAL_BOUNDARY=self_only",
+	)
+	selfOnlyGens, selfOnlyErrs := run(selfOnlyEnv)
+	if diff := cmp.Diff(baseErrs, selfOnlyErrs); diff != "" {
+		t.Fatalf("self_only errors mismatch (-base +self_only):\n%s", diff)
+	}
+	if len(baseGens) != len(selfOnlyGens) {
+		t.Fatalf("generated file count = %d, want %d", len(selfOnlyGens), len(baseGens))
+	}
+	for i := range baseGens {
+		if baseGens[i].PkgPath != selfOnlyGens[i].PkgPath {
+			t.Fatalf("generated package[%d] = %q, want %q", i, selfOnlyGens[i].PkgPath, baseGens[i].PkgPath)
+		}
+		if diff := cmp.Diff(string(baseGens[i].Content), string(selfOnlyGens[i].Content)); diff != "" {
+			t.Fatalf("generated content mismatch for %q (-base +self_only):\n%s", baseGens[i].PkgPath, diff)
+		}
+		baseGenErrs := comparableGenerateErrors(baseGens[i].Errs)
+		selfOnlyGenErrs := comparableGenerateErrors(selfOnlyGens[i].Errs)
+		if diff := cmp.Diff(baseGenErrs, selfOnlyGenErrs); diff != "" {
+			t.Fatalf("generate errs mismatch for %q (-base +self_only):\n%s", baseGens[i].PkgPath, diff)
+		}
+	}
+}
+
+func comparableGenerateErrors(errs []error) []string {
+	out := make([]string, len(errs))
+	for i, err := range errs {
+		out[i] = err.Error()
+	}
+	sort.Strings(out)
+	return out
 }
 
 func TestZeroValue(t *testing.T) {
