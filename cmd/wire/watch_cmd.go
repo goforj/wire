@@ -131,9 +131,9 @@ func (cmd *watchCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...inter
 			}
 			if wrote, err := out.CommitWithStatus(); err == nil {
 				if wrote {
-					log.Printf("%s: wrote %s (%s)\n", out.PkgPath, out.OutputPath, formatDuration(time.Since(totalStart)))
+					logSuccessf("%s: wrote %s (%s)", out.PkgPath, out.OutputPath, formatDuration(time.Since(totalStart)))
 				} else {
-					log.Printf("%s: unchanged %s (%s)\n", out.PkgPath, out.OutputPath, formatDuration(time.Since(totalStart)))
+					logSuccessf("%s: unchanged %s (%s)", out.PkgPath, out.OutputPath, formatDuration(time.Since(totalStart)))
 				}
 			} else {
 				log.Printf("%s: failed to write %s: %v\n", out.PkgPath, out.OutputPath, err)

@@ -79,14 +79,15 @@ func writeManifest(wd string, env []string, patterns []string, opts *GenerateOpt
 		return
 	}
 	key := manifestKey(wd, env, patterns, opts)
+	scope := runCacheScope(wd, patterns)
 	manifest := &cacheManifest{
 		Version:    cacheVersion,
-		WD:         wd,
+		WD:         scope,
 		Tags:       opts.Tags,
 		Prefix:     opts.PrefixOutputFile,
 		HeaderHash: headerHash(opts.Header),
 		EnvHash:    envHash(env),
-		Patterns:   sortedStrings(patterns),
+		Patterns:   normalizePatternsForScope(wd, packageCacheScope(wd), patterns),
 	}
 	manifest.ExtraFiles = extraCacheFiles(wd)
 	for _, pkg := range pkgs {
@@ -138,7 +139,7 @@ func manifestKey(wd string, env []string, patterns []string, opts *GenerateOptio
 	h := sha256.New()
 	h.Write([]byte(cacheVersion))
 	h.Write([]byte{0})
-	h.Write([]byte(filepath.Clean(wd)))
+	h.Write([]byte(runCacheScope(wd, patterns)))
 	h.Write([]byte{0})
 	h.Write([]byte(envHash(env)))
 	h.Write([]byte{0})
@@ -148,7 +149,7 @@ func manifestKey(wd string, env []string, patterns []string, opts *GenerateOptio
 	h.Write([]byte{0})
 	h.Write([]byte(headerHash(opts.Header)))
 	h.Write([]byte{0})
-	for _, p := range sortedStrings(patterns) {
+	for _, p := range normalizePatternsForScope(wd, packageCacheScope(wd), patterns) {
 		h.Write([]byte(p))
 		h.Write([]byte{0})
 	}
@@ -293,19 +294,17 @@ func manifestValid(manifest *cacheManifest) bool {
 
 // buildCacheFilesFromMeta re-stats files to compare metadata.
 func buildCacheFilesFromMeta(files []cacheFile) ([]cacheFile, error) {
-	out := make([]cacheFile, 0, len(files))
-	for _, file := range files {
+	return buildCacheFilesWithStats(files, func(file cacheFile) (cacheFile, error) {
 		info, err := osStat(file.Path)
 		if err != nil {
-			return nil, err
+			return cacheFile{}, err
 		}
-		out = append(out, cacheFile{
+		return cacheFile{
 			Path:    filepath.Clean(file.Path),
 			Size:    info.Size(),
 			ModTime: info.ModTime().UnixNano(),
-		})
-	}
-	return out, nil
+		}, nil
+	})
 }
 
 // extraCacheFiles returns Go module/workspace files affecting builds.

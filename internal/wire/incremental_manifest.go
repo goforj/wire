@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"go/token"
 	"os"
 	"path/filepath"
 	"sort"
@@ -28,7 +29,7 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
-const incrementalManifestVersion = "wire-incremental-manifest-v1"
+const incrementalManifestVersion = "wire-incremental-manifest-v3"
 
 type incrementalManifest struct {
 	Version       string
@@ -61,8 +62,18 @@ type incrementalPreloadState struct {
 	manifest     *incrementalManifest
 	valid        bool
 	currentLocal []packageFingerprint
+	touched      []string
 	reason       string
 }
+
+type incrementalPreloadValidation struct {
+	valid        bool
+	currentLocal []packageFingerprint
+	touched      []string
+	reason       string
+}
+
+const touchedValidationVersion = "wire-touched-validation-v1"
 
 func readPreloadIncrementalManifestResults(ctx context.Context, wd string, env []string, patterns []string, opts *GenerateOptions) ([]GenerateResult, bool) {
 	state, ok := prepareIncrementalPreloadState(ctx, wd, env, patterns, opts)
@@ -75,15 +86,36 @@ func readPreloadIncrementalManifestResultsFromState(ctx context.Context, wd stri
 		return nil, false
 	}
 	if state.valid {
+		validateStart := timeNow()
+		if len(state.touched) > 0 {
+			debugf(ctx, "incremental.preload_manifest touched=%s", strings.Join(state.touched, ","))
+		}
+		if err := validateIncrementalPreloadTouchedPackages(ctx, wd, env, opts, state.currentLocal, state.touched); err != nil {
+			logTiming(ctx, "incremental.preload_manifest.validate_touched", validateStart)
+			if shouldBypassIncrementalManifestAfterFastPathError(err) {
+				invalidateIncrementalPreloadState(state)
+			}
+			debugf(ctx, "incremental.preload_manifest miss reason=touched_validation")
+			return nil, false
+		}
+		logTiming(ctx, "incremental.preload_manifest.validate_touched", validateStart)
+		outputsStart := timeNow()
 		results, ok := incrementalManifestOutputs(state.manifest)
+		logTiming(ctx, "incremental.preload_manifest.outputs", outputsStart)
 		if !ok {
 			debugf(ctx, "incremental.preload_manifest miss reason=outputs")
 			return nil, false
 		}
+		if manifestNeedsLocalRefresh(state.manifest.LocalPackages, state.currentLocal) {
+			refreshed := *state.manifest
+			refreshed.LocalPackages = append([]packageFingerprint(nil), state.currentLocal...)
+			writeIncrementalManifestFile(state.selectorKey, &refreshed)
+			writeIncrementalManifestFile(incrementalManifestStateKey(state.selectorKey, refreshed.LocalPackages), &refreshed)
+		}
 		debugf(ctx, "incremental.preload_manifest hit outputs=%d", len(results))
 		return results, true
 	} else if archived := readStateIncrementalManifest(state.selectorKey, state.currentLocal); archived != nil {
-		if ok, _, _ := incrementalManifestPreloadValid(ctx, archived, wd, env, patterns, opts); ok {
+		if validation := incrementalManifestPreloadValid(ctx, archived, wd, env, patterns, opts); validation.valid {
 			results, ok := incrementalManifestOutputs(archived)
 			if !ok {
 				debugf(ctx, "incremental.preload_manifest miss reason=state_outputs")
@@ -107,13 +139,14 @@ func prepareIncrementalPreloadState(ctx context.Context, wd string, env []string
 	if !ok {
 		return nil, false
 	}
-	valid, currentLocal, reason := incrementalManifestPreloadValid(ctx, manifest, wd, env, patterns, opts)
+	validation := incrementalManifestPreloadValid(ctx, manifest, wd, env, patterns, opts)
 	return &incrementalPreloadState{
 		selectorKey:  selectorKey,
 		manifest:     manifest,
-		valid:        valid,
-		currentLocal: currentLocal,
-		reason:       reason,
+		valid:        validation.valid,
+		currentLocal: validation.currentLocal,
+		touched:      validation.touched,
+		reason:       validation.reason,
 	}, true
 }
 
@@ -150,6 +183,7 @@ func writeIncrementalManifestWithOptions(wd string, env []string, patterns []str
 	if snapshot == nil || len(generated) == 0 {
 		return
 	}
+	scope := runCacheScope(wd, patterns)
 	externalPkgs := buildExternalPackageExports(wd, pkgs)
 	var externalFiles []cacheFile
 	if includeExternalFiles {
@@ -161,12 +195,12 @@ func writeIncrementalManifestWithOptions(wd string, env []string, patterns []str
 	}
 	manifest := &incrementalManifest{
 		Version:       incrementalManifestVersion,
-		WD:            filepath.Clean(wd),
+		WD:            scope,
 		Tags:          opts.Tags,
 		Prefix:        opts.PrefixOutputFile,
 		HeaderHash:    headerHash(opts.Header),
 		EnvHash:       envHash(env),
-		Patterns:      sortedStrings(patterns),
+		Patterns:      normalizePatternsForScope(wd, packageCacheScope(wd), patterns),
 		LocalPackages: snapshotPackageFingerprints(snapshot),
 		ExternalPkgs:  externalPkgs,
 		ExternalFiles: externalFiles,
@@ -197,7 +231,7 @@ func incrementalManifestSelectorKey(wd string, env []string, patterns []string, 
 	h := sha256.New()
 	h.Write([]byte(incrementalManifestVersion))
 	h.Write([]byte{0})
-	h.Write([]byte(filepath.Clean(wd)))
+	h.Write([]byte(runCacheScope(wd, patterns)))
 	h.Write([]byte{0})
 	h.Write([]byte(envHash(env)))
 	h.Write([]byte{0})
@@ -207,7 +241,7 @@ func incrementalManifestSelectorKey(wd string, env []string, patterns []string, 
 	h.Write([]byte{0})
 	h.Write([]byte(headerHash(opts.Header)))
 	h.Write([]byte{0})
-	for _, p := range sortedStrings(patterns) {
+	for _, p := range normalizePatternsForScope(wd, packageCacheScope(wd), patterns) {
 		h.Write([]byte(p))
 		h.Write([]byte{0})
 	}
@@ -276,16 +310,17 @@ func incrementalManifestValid(manifest *incrementalManifest, wd string, env []st
 	if manifest == nil || manifest.Version != incrementalManifestVersion {
 		return false
 	}
-	if filepath.Clean(manifest.WD) != filepath.Clean(wd) || manifest.Tags != opts.Tags || manifest.Prefix != opts.PrefixOutputFile {
+	if manifest.WD != runCacheScope(wd, patterns) || manifest.Tags != opts.Tags || manifest.Prefix != opts.PrefixOutputFile {
 		return false
 	}
 	if manifest.HeaderHash != headerHash(opts.Header) || manifest.EnvHash != envHash(env) {
 		return false
 	}
-	if len(manifest.Patterns) != len(patterns) {
+	normalizedPatterns := normalizePatternsForScope(wd, packageCacheScope(wd), patterns)
+	if len(manifest.Patterns) != len(normalizedPatterns) {
 		return false
 	}
-	for i, p := range sortedStrings(patterns) {
+	for i, p := range normalizedPatterns {
 		if manifest.Patterns[i] != p {
 			return false
 		}
@@ -313,58 +348,93 @@ func incrementalManifestValid(manifest *incrementalManifest, wd string, env []st
 	return len(manifest.Outputs) > 0
 }
 
-func incrementalManifestPreloadValid(ctx context.Context, manifest *incrementalManifest, wd string, env []string, patterns []string, opts *GenerateOptions) (bool, []packageFingerprint, string) {
+func incrementalManifestPreloadValid(ctx context.Context, manifest *incrementalManifest, wd string, env []string, patterns []string, opts *GenerateOptions) incrementalPreloadValidation {
 	if manifest == nil || manifest.Version != incrementalManifestVersion {
-		return false, nil, "version"
+		return incrementalPreloadValidation{reason: "version"}
 	}
-	if filepath.Clean(manifest.WD) != filepath.Clean(wd) || manifest.Tags != opts.Tags || manifest.Prefix != opts.PrefixOutputFile {
-		return false, nil, "config"
+	if manifest.WD != runCacheScope(wd, patterns) || manifest.Tags != opts.Tags || manifest.Prefix != opts.PrefixOutputFile {
+		return incrementalPreloadValidation{reason: "config"}
 	}
 	if manifest.HeaderHash != headerHash(opts.Header) || manifest.EnvHash != envHash(env) {
-		return false, nil, "env"
+		return incrementalPreloadValidation{reason: "env"}
 	}
-	if len(manifest.Patterns) != len(patterns) {
-		return false, nil, "patterns.length"
+	normalizedPatterns := normalizePatternsForScope(wd, packageCacheScope(wd), patterns)
+	if len(manifest.Patterns) != len(normalizedPatterns) {
+		return incrementalPreloadValidation{reason: "patterns.length"}
 	}
-	for i, p := range sortedStrings(patterns) {
+	for i, p := range normalizedPatterns {
 		if manifest.Patterns[i] != p {
-			return false, nil, "patterns.value"
+			return incrementalPreloadValidation{reason: "patterns.value"}
 		}
 	}
 	if len(manifest.ExtraFiles) > 0 {
+		extraStart := timeNow()
 		current, err := buildCacheFilesFromMeta(manifest.ExtraFiles)
+		logTiming(ctx, "incremental.preload_manifest.validate_extra_files", extraStart)
 		if err != nil || len(current) != len(manifest.ExtraFiles) {
-			return false, nil, "extra_files"
+			return incrementalPreloadValidation{reason: "extra_files"}
 		}
 		for i := range current {
 			if current[i] != manifest.ExtraFiles[i] {
-				return false, nil, "extra_files.diff"
+				return incrementalPreloadValidation{reason: "extra_files.diff"}
 			}
 		}
 	}
-	currentLocal, ok, reason := incrementalManifestCurrentLocalPackages(ctx, manifest.LocalPackages)
-	if !ok {
-		return false, currentLocal, "local_packages." + reason
+	localStart := timeNow()
+	packagesState := incrementalManifestCurrentLocalPackages(ctx, manifest.LocalPackages)
+	logTiming(ctx, "incremental.preload_manifest.validate_local_packages", localStart)
+	if !packagesState.valid {
+		return incrementalPreloadValidation{
+			currentLocal: packagesState.currentLocal,
+			touched:      packagesState.touched,
+			reason:       "local_packages." + packagesState.reason,
+		}
 	}
 	if len(manifest.ExternalFiles) > 0 {
+		externalStart := timeNow()
 		current, err := buildCacheFilesFromMeta(manifest.ExternalFiles)
+		logTiming(ctx, "incremental.preload_manifest.validate_external_files", externalStart)
 		if err != nil || len(current) != len(manifest.ExternalFiles) {
-			return false, currentLocal, "external_files"
+			return incrementalPreloadValidation{
+				currentLocal: packagesState.currentLocal,
+				touched:      packagesState.touched,
+				reason:       "external_files",
+			}
 		}
 		for i := range current {
 			if current[i] != manifest.ExternalFiles[i] {
-				return false, currentLocal, "external_files.diff"
+				return incrementalPreloadValidation{
+					currentLocal: packagesState.currentLocal,
+					touched:      packagesState.touched,
+					reason:       "external_files.diff",
+				}
 			}
 		}
 	}
 	if len(manifest.Outputs) == 0 {
-		return false, currentLocal, "outputs"
+		return incrementalPreloadValidation{
+			currentLocal: packagesState.currentLocal,
+			touched:      packagesState.touched,
+			reason:       "outputs",
+		}
 	}
-	return true, currentLocal, ""
+	return incrementalPreloadValidation{
+		valid:        true,
+		currentLocal: packagesState.currentLocal,
+		touched:      packagesState.touched,
+	}
 }
 
-func incrementalManifestCurrentLocalPackages(ctx context.Context, local []packageFingerprint) ([]packageFingerprint, bool, string) {
+type incrementalLocalPackagesState struct {
+	valid        bool
+	currentLocal []packageFingerprint
+	touched      []string
+	reason       string
+}
+
+func incrementalManifestCurrentLocalPackages(ctx context.Context, local []packageFingerprint) incrementalLocalPackagesState {
 	currentState := make([]packageFingerprint, 0, len(local))
+	touched := make([]string, 0, len(local))
 	var firstReason string
 	for _, fp := range local {
 		if len(fp.Files) == 0 {
@@ -400,42 +470,158 @@ func incrementalManifestCurrentLocalPackages(ctx context.Context, local []packag
 			}
 		}
 		if !sameMeta {
-			shapeHash, err := packageShapeHash(storedFiles)
+			if diffs := describeCacheFileDiffs(fp.Files, currentMeta); len(diffs) > 0 {
+				debugf(ctx, "incremental.preload_manifest local_pkg=%s meta_diff=%s", fp.PkgPath, strings.Join(diffs, "; "))
+			}
+			contentHash, err := hashFiles(storedFiles)
 			if err != nil {
-				debugf(ctx, "incremental.preload_manifest local_pkg=%s shape_error=%v", fp.PkgPath, err)
+				debugf(ctx, "incremental.preload_manifest local_pkg=%s content_error=%v", fp.PkgPath, err)
 				if firstReason == "" {
-					firstReason = fp.PkgPath + ".shape_error"
+					firstReason = fp.PkgPath + ".content_error"
 				}
 				continue
 			}
-			currentFP.ShapeHash = shapeHash
-			if shapeHash != fp.ShapeHash {
-				debugf(ctx, "incremental.preload_manifest local_pkg=%s stored_shape=%s current_shape=%s files=%s", fp.PkgPath, fp.ShapeHash, shapeHash, strings.Join(storedFiles, ","))
-				if firstReason == "" {
-					firstReason = fp.PkgPath + ".shape_mismatch"
+			currentFP.ContentHash = contentHash
+			if contentHash != fp.ContentHash {
+				debugf(ctx, "incremental.preload_manifest local_pkg=%s stored_content=%s current_content=%s hash_files=%s", fp.PkgPath, fp.ContentHash, contentHash, strings.Join(storedFiles, ","))
+				shapeHash, err := packageShapeHash(storedFiles)
+				if err != nil {
+					debugf(ctx, "incremental.preload_manifest local_pkg=%s shape_error=%v", fp.PkgPath, err)
+					if firstReason == "" {
+						firstReason = fp.PkgPath + ".shape_error"
+					}
+					continue
 				}
-			} else if firstReason == "" {
-				firstReason = fp.PkgPath + ".meta_changed"
+				currentFP.ShapeHash = shapeHash
+				if shapeHash != fp.ShapeHash {
+					debugf(ctx, "incremental.preload_manifest local_pkg=%s stored_shape=%s current_shape=%s files=%s", fp.PkgPath, fp.ShapeHash, shapeHash, strings.Join(storedFiles, ","))
+					if firstReason == "" {
+						firstReason = fp.PkgPath + ".shape_mismatch"
+					}
+				} else {
+					debugf(ctx, "incremental.preload_manifest local_pkg=%s content_changed_shape_unchanged", fp.PkgPath)
+					touched = append(touched, fp.PkgPath)
+				}
 			}
 		}
-		if changed, err := packageDirectoryIntroducedRelevantFiles(fp.Files); err != nil {
-			debugf(ctx, "incremental.preload_manifest local_pkg=%s dir_scan_error=%v", fp.PkgPath, err)
+		currentDirs, dirsChanged, err := packageDirectoryMetaChanged(fp, storedFiles)
+		if err != nil {
+			debugf(ctx, "incremental.preload_manifest local_pkg=%s dir_meta_error=%v", fp.PkgPath, err)
 			if firstReason == "" {
-				firstReason = fp.PkgPath + ".dir_scan_error"
+				firstReason = fp.PkgPath + ".dir_meta_error"
 			}
 			continue
-		} else if changed {
-			debugf(ctx, "incremental.preload_manifest local_pkg=%s introduced_relevant_files=true", fp.PkgPath)
-			if firstReason == "" {
-				firstReason = fp.PkgPath + ".introduced_relevant_files"
+		}
+		currentFP.Dirs = currentDirs
+		if dirsChanged {
+			if changed, err := packageDirectoryIntroducedRelevantFiles(fp.Files); err != nil {
+				debugf(ctx, "incremental.preload_manifest local_pkg=%s dir_scan_error=%v", fp.PkgPath, err)
+				if firstReason == "" {
+					firstReason = fp.PkgPath + ".dir_scan_error"
+				}
+				continue
+			} else if changed {
+				debugf(ctx, "incremental.preload_manifest local_pkg=%s introduced_relevant_files=true", fp.PkgPath)
+				if firstReason == "" {
+					firstReason = fp.PkgPath + ".introduced_relevant_files"
+				}
 			}
 		}
 		currentState = append(currentState, currentFP)
 	}
 	if firstReason != "" {
-		return currentState, false, firstReason
+		return incrementalLocalPackagesState{
+			currentLocal: currentState,
+			touched:      touched,
+			reason:       firstReason,
+		}
 	}
-	return currentState, true, ""
+	sort.Strings(touched)
+	return incrementalLocalPackagesState{
+		valid:        true,
+		currentLocal: currentState,
+		touched:      touched,
+	}
+}
+
+func validateIncrementalPreloadTouchedPackages(ctx context.Context, wd string, env []string, opts *GenerateOptions, local []packageFingerprint, touched []string) error {
+	if len(touched) == 0 {
+		return nil
+	}
+	cacheKey := touchedValidationKey(wd, env, opts, local, touched)
+	if cacheKey != "" {
+		cacheHitStart := timeNow()
+		if _, ok := readCache(cacheKey); ok {
+			logTiming(ctx, "incremental.preload_manifest.validate_touched_cache_hit", cacheHitStart)
+			return nil
+		}
+	}
+	cfg := &packages.Config{
+		Context:    ctx,
+		Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps | packages.NeedExportsFile | packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesSizes,
+		Dir:        wd,
+		Env:        env,
+		BuildFlags: []string{"-tags=wireinject"},
+		Fset:       token.NewFileSet(),
+	}
+	if len(opts.Tags) > 0 {
+		cfg.BuildFlags[0] += " " + opts.Tags
+	}
+	loadStart := timeNow()
+	pkgs, err := packages.Load(cfg, touched...)
+	logTiming(ctx, "incremental.preload_manifest.validate_touched_load", loadStart)
+	if err != nil {
+		return err
+	}
+	errorsStart := timeNow()
+	byPath := make(map[string]*packages.Package, len(pkgs))
+	for _, pkg := range pkgs {
+		if pkg != nil {
+			byPath[pkg.PkgPath] = pkg
+		}
+	}
+	for _, path := range touched {
+		if pkg := byPath[path]; pkg != nil && len(pkg.Errors) > 0 {
+			logTiming(ctx, "incremental.preload_manifest.validate_touched_errors", errorsStart)
+			return formatLocalTypeCheckError(wd, pkg.PkgPath, pkg.Errors)
+		}
+	}
+	logTiming(ctx, "incremental.preload_manifest.validate_touched_errors", errorsStart)
+	if cacheKey != "" {
+		cacheWriteStart := timeNow()
+		writeCache(cacheKey, []byte("ok"))
+		logTiming(ctx, "incremental.preload_manifest.validate_touched_cache_write", cacheWriteStart)
+	}
+	return nil
+}
+
+func touchedValidationKey(wd string, env []string, opts *GenerateOptions, local []packageFingerprint, touched []string) string {
+	if len(touched) == 0 {
+		return ""
+	}
+	byPath := fingerprintsFromSlice(local)
+	h := sha256.New()
+	h.Write([]byte(touchedValidationVersion))
+	h.Write([]byte{0})
+	h.Write([]byte(packageCacheScope(wd)))
+	h.Write([]byte{0})
+	h.Write([]byte(envHash(env)))
+	h.Write([]byte{0})
+	if opts != nil {
+		h.Write([]byte(opts.Tags))
+	}
+	h.Write([]byte{0})
+	for _, pkgPath := range touched {
+		fp := byPath[pkgPath]
+		if fp == nil || fp.ContentHash == "" {
+			return ""
+		}
+		h.Write([]byte(pkgPath))
+		h.Write([]byte{0})
+		h.Write([]byte(fp.ContentHash))
+		h.Write([]byte{0})
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 func incrementalManifestOutputs(manifest *incrementalManifest) ([]GenerateResult, bool) {
@@ -498,6 +684,89 @@ func filesFromMeta(files []cacheFile) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func describeCacheFileDiffs(stored []cacheFile, current []cacheFile) []string {
+	if len(stored) == 0 && len(current) == 0 {
+		return nil
+	}
+	storedByPath := make(map[string]cacheFile, len(stored))
+	currentByPath := make(map[string]cacheFile, len(current))
+	for _, file := range stored {
+		storedByPath[filepath.Clean(file.Path)] = file
+	}
+	for _, file := range current {
+		currentByPath[filepath.Clean(file.Path)] = file
+	}
+	paths := make([]string, 0, len(storedByPath)+len(currentByPath))
+	seen := make(map[string]struct{}, len(storedByPath)+len(currentByPath))
+	for path := range storedByPath {
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	for path := range currentByPath {
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	diffs := make([]string, 0, len(paths))
+	for _, path := range paths {
+		storedFile, storedOK := storedByPath[path]
+		currentFile, currentOK := currentByPath[path]
+		switch {
+		case !storedOK:
+			diffs = append(diffs, fmt.Sprintf("%s added size=%d mtime=%d", path, currentFile.Size, currentFile.ModTime))
+		case !currentOK:
+			diffs = append(diffs, fmt.Sprintf("%s removed size=%d mtime=%d", path, storedFile.Size, storedFile.ModTime))
+		case storedFile != currentFile:
+			diffs = append(diffs, fmt.Sprintf("%s size:%d->%d mtime:%d->%d", path, storedFile.Size, currentFile.Size, storedFile.ModTime, currentFile.ModTime))
+		}
+	}
+	return diffs
+}
+
+func manifestNeedsLocalRefresh(stored []packageFingerprint, current []packageFingerprint) bool {
+	if len(stored) != len(current) {
+		return false
+	}
+	for i := range stored {
+		if stored[i].PkgPath != current[i].PkgPath {
+			return false
+		}
+		if stored[i].ContentHash == "" && current[i].ContentHash != "" {
+			return true
+		}
+		if len(stored[i].Dirs) == 0 && len(current[i].Dirs) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func packageDirectoryMetaChanged(fp packageFingerprint, storedFiles []string) ([]cacheFile, bool, error) {
+	dirs := packageFingerprintDirs(storedFiles)
+	if len(dirs) == 0 {
+		return nil, false, nil
+	}
+	current, err := buildCacheFiles(dirs)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(fp.Dirs) != len(current) {
+		return current, true, nil
+	}
+	for i := range current {
+		if current[i] != fp.Dirs[i] {
+			return current, true, nil
+		}
+	}
+	return current, false, nil
 }
 
 func packageDirectoryIntroducedRelevantFiles(files []cacheFile) (bool, error) {

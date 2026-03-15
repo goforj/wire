@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -28,6 +30,19 @@ func TestFormatLoggedErrorLeavesNonSolveErrorsUnchanged(t *testing.T) {
 	got := formatLoggedError(err)
 	if got != err.Error() {
 		t.Fatalf("formatLoggedError() = %q, want %q", got, err.Error())
+	}
+}
+
+func TestTruncateLoggedErrorSummarizesLargeBlocks(t *testing.T) {
+	lines := make([]string, 0, maxLoggedErrorLines+3)
+	for i := 0; i < maxLoggedErrorLines+3; i++ {
+		lines = append(lines, fmt.Sprintf("line %d", i+1))
+	}
+	got := truncateLoggedError(strings.Join(lines, "\n"))
+	wantLines := append(append([]string(nil), lines[:maxLoggedErrorLines]...), "... (3 additional lines omitted)")
+	want := strings.Join(wantLines, "\n")
+	if got != want {
+		t.Fatalf("truncateLoggedError() = %q, want %q", got, want)
 	}
 }
 
@@ -71,7 +86,7 @@ func TestWriteErrorLogFormatsWirePrefix(t *testing.T) {
 	var buf bytes.Buffer
 	writeErrorLog(&buf, "type-check failed for example.com/app/app")
 	got := buf.String()
-	want := "wire: type-check failed for example.com/app/app\n"
+	want := errorSig + "wire: type-check failed for example.com/app/app\n"
 	if got != want {
 		t.Fatalf("writeErrorLog() = %q, want %q", got, want)
 	}
@@ -86,7 +101,7 @@ func TestWriteErrorLogColorsWholeBlockWhenForced(t *testing.T) {
 	var buf bytes.Buffer
 	writeErrorLog(&buf, "type-check failed for example.com/app/app")
 	got := buf.String()
-	want := ansiRed + "wire: type-check failed for example.com/app/app\n" + ansiReset
+	want := ansiRed + errorSig + "wire: type-check failed for example.com/app/app\n" + ansiReset
 	if got != want {
 		t.Fatalf("writeErrorLog() = %q, want %q", got, want)
 	}
@@ -101,11 +116,21 @@ func TestWriteErrorLogColorsEachMultilineLineWhenForced(t *testing.T) {
 	var buf bytes.Buffer
 	writeErrorLog(&buf, "\n    first line\n    second line")
 	got := buf.String()
-	want := ansiRed + "wire: \n" + ansiReset +
+	want := ansiRed + errorSig + "wire: \n" + ansiReset +
 		ansiRed + "    first line\n" + ansiReset +
 		ansiRed + "    second line\n" + ansiReset
 	if got != want {
 		t.Fatalf("writeErrorLog() = %q, want %q", got, want)
+	}
+}
+
+func TestWriteStatusLogFormatsSuccessPrefix(t *testing.T) {
+	var buf bytes.Buffer
+	writeStatusLog(&buf, "example.com/app: wrote /tmp/wire_gen.go (12ms)")
+	got := buf.String()
+	want := successSig + "wire: example.com/app: wrote /tmp/wire_gen.go (12ms)\n"
+	if got != want {
+		t.Fatalf("writeStatusLog() = %q, want %q", got, want)
 	}
 }
 

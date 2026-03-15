@@ -99,7 +99,7 @@ func incrementalSummaryKey(wd string, tags string, pkgPath string) string {
 	h := sha256.New()
 	h.Write([]byte(incrementalSummaryVersion))
 	h.Write([]byte{0})
-	h.Write([]byte(filepath.Clean(wd)))
+	h.Write([]byte(packageCacheScope(wd)))
 	h.Write([]byte{0})
 	h.Write([]byte(tags))
 	h.Write([]byte{0})

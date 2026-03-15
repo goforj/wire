@@ -605,16 +605,18 @@ func TestManifestKeyHelpers(t *testing.T) {
 		PrefixOutputFile: "prefix",
 		Header:           []byte("header"),
 	}
+	wd := t.TempDir()
+	patterns := []string{"./a", "./b"}
 	manifest := &cacheManifest{
-		WD:         t.TempDir(),
+		WD:         runCacheScope(wd, patterns),
 		EnvHash:    envHash(env),
 		Tags:       opts.Tags,
 		Prefix:     opts.PrefixOutputFile,
 		HeaderHash: headerHash(opts.Header),
-		Patterns:   []string{"./a", "./b"},
+		Patterns:   normalizePatternsForScope(wd, packageCacheScope(wd), patterns),
 	}
 	got := manifestKeyFromManifest(manifest)
-	want := manifestKey(manifest.WD, env, manifest.Patterns, opts)
+	want := manifestKey(wd, env, patterns, opts)
 	if got != want {
 		t.Fatalf("manifest key mismatch: got %q, want %q", got, want)
 	}

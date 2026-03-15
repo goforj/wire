@@ -31,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/tools/go/gcexportdata"
 	"golang.org/x/tools/go/packages"
 )
 
@@ -96,8 +97,10 @@ func tryIncrementalLocalFastPath(ctx context.Context, wd string, env []string, p
 	for _, path := range snapshot.changed {
 		changedSet[path] = struct{}{}
 	}
+	currentPackages := loaded.currentPackages()
 	writeIncrementalFingerprints(snapshot, wd, opts.Tags)
-	writeIncrementalPackageSummariesWithSummary(loader, loaded.allPackages, newSummaryProviderResolver(ctx, loaded.loader.summaries, loaded.loader.importExportPackage), changedSet)
+	writeLocalPackageExports(wd, opts.Tags, currentPackages, loaded.fingerprints)
+	writeIncrementalPackageSummariesWithSummary(loader, currentPackages, newSummaryProviderResolver(ctx, loaded.loader.summaries, loaded.loader.importExportPackage), changedSet)
 	writeIncrementalManifestFromState(wd, env, patterns, opts, state, snapshot, generated)
 	writeIncrementalGraphFromSnapshot(wd, opts.Tags, roots, loaded.fingerprints)
 
@@ -235,6 +238,21 @@ type localFastPathLoaded struct {
 	loader       *localFastPathLoader
 }
 
+func (l *localFastPathLoaded) currentPackages() []*packages.Package {
+	if l == nil {
+		return nil
+	}
+	if l.loader == nil || len(l.loader.pkgs) == 0 {
+		return l.allPackages
+	}
+	all := make([]*packages.Package, 0, len(l.loader.pkgs))
+	for _, pkg := range l.loader.pkgs {
+		all = append(all, pkg)
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].PkgPath < all[j].PkgPath })
+	return all
+}
+
 type localFastPathLoader struct {
 	ctx          context.Context
 	wd           string
@@ -249,10 +267,25 @@ type localFastPathLoader struct {
 	pkgs         map[string]*packages.Package
 	imported     map[string]*types.Package
 	externalMeta map[string]externalPackageExport
+	localExports map[string]string
 	externalImp  types.Importer
+	externalFallback types.Importer
 }
 
 func loadLocalPackagesForFastPath(ctx context.Context, wd string, tags string, rootPkgPath string, changed []string, current []packageFingerprint, external []externalPackageExport) (*localFastPathLoaded, error) {
+	return loadLocalPackagesForFastPathMode(ctx, wd, tags, rootPkgPath, changed, current, external, false)
+}
+
+func validateTouchedPackagesFastPath(ctx context.Context, wd string, tags string, touched []string, current []packageFingerprint, external []externalPackageExport) error {
+	if len(touched) == 0 {
+		return nil
+	}
+	rootPkgPath := touched[0]
+	_, err := loadLocalPackagesForFastPathMode(ctx, wd, tags, rootPkgPath, touched, current, external, true)
+	return err
+}
+
+func loadLocalPackagesForFastPathMode(ctx context.Context, wd string, tags string, rootPkgPath string, changed []string, current []packageFingerprint, external []externalPackageExport, validationOnly bool) (*localFastPathLoaded, error) {
 	meta := fingerprintsFromSlice(current)
 	if len(meta) == 0 {
 		return nil, fmt.Errorf("no local fingerprints")
@@ -263,6 +296,9 @@ func loadLocalPackagesForFastPath(ctx context.Context, wd string, tags string, r
 	externalMeta := make(map[string]externalPackageExport, len(external))
 	for _, item := range external {
 		if item.PkgPath == "" || item.ExportFile == "" {
+			continue
+		}
+		if meta[item.PkgPath] != nil {
 			continue
 		}
 		externalMeta[item.PkgPath] = item
@@ -281,12 +317,18 @@ func loadLocalPackagesForFastPath(ctx context.Context, wd string, tags string, r
 		pkgs:         make(map[string]*packages.Package, len(meta)),
 		imported:     make(map[string]*types.Package, len(meta)+len(externalMeta)),
 		externalMeta: externalMeta,
+		localExports: make(map[string]string),
 	}
 	for _, path := range changed {
 		loader.changedPkgs[path] = struct{}{}
 	}
-	loader.markSourceClosure()
-	candidates := make(map[string]*packageSummary)
+	if validationOnly {
+		for path := range loader.changedPkgs {
+			loader.sourcePkgs[path] = struct{}{}
+		}
+	} else {
+		loader.markSourceClosure()
+	}
 	for path, fp := range meta {
 		if path == rootPkgPath {
 			continue
@@ -294,7 +336,19 @@ func loadLocalPackagesForFastPath(ctx context.Context, wd string, tags string, r
 		if _, changed := loader.changedPkgs[path]; changed {
 			continue
 		}
-		if _, ok := externalMeta[path]; !ok {
+		if _, ok := loader.sourcePkgs[path]; ok {
+			continue
+		}
+		if exportPath := localExportPathForFingerprint(wd, tags, fp); exportPath != "" && localExportExists(wd, tags, fp) {
+			loader.localExports[path] = exportPath
+		}
+	}
+	candidates := make(map[string]*packageSummary)
+	for path, fp := range meta {
+		if path == rootPkgPath {
+			continue
+		}
+		if _, changed := loader.changedPkgs[path]; changed {
 			continue
 		}
 		summary, ok := readIncrementalPackageSummary(incrementalSummaryKey(wd, tags, path))
@@ -305,9 +359,24 @@ func loadLocalPackagesForFastPath(ctx context.Context, wd string, tags string, r
 	}
 	loader.summaries = filterSupportedPackageSummaries(candidates)
 	loader.externalImp = importerpkg.ForCompiler(loader.fset, "gc", loader.openExternalExport)
-	root, err := loader.load(rootPkgPath)
-	if err != nil {
-		return nil, err
+	loader.externalFallback = importerpkg.ForCompiler(loader.fset, "gc", nil)
+	var root *packages.Package
+	if validationOnly {
+		for _, path := range changed {
+			pkg, err := loader.load(path)
+			if err != nil {
+				return nil, err
+			}
+			if root == nil {
+				root = pkg
+			}
+		}
+	} else {
+		var err error
+		root, err = loader.load(rootPkgPath)
+		if err != nil {
+			return nil, err
+		}
 	}
 	all := make([]*packages.Package, 0, len(loader.pkgs))
 	for _, pkg := range loader.pkgs {
@@ -341,6 +410,7 @@ func (l *localFastPathLoader) load(pkgPath string) (*packages.Package, error) {
 		mode |= parser.ParseComments
 	}
 	syntax := make([]*ast.File, 0, len(files))
+	parseStart := time.Now()
 	for _, name := range files {
 		file, err := l.parseFileForFastPath(name, mode, pkgPath)
 		if err != nil {
@@ -348,6 +418,7 @@ func (l *localFastPathLoader) load(pkgPath string) (*packages.Package, error) {
 		}
 		syntax = append(syntax, file)
 	}
+	logTiming(l.ctx, "incremental.local_fastpath.parse", parseStart)
 	if len(syntax) == 0 {
 		return nil, fmt.Errorf("package %s parsed no files", pkgPath)
 	}
@@ -376,7 +447,9 @@ func (l *localFastPathLoader) load(pkgPath string) (*packages.Package, error) {
 			pkg.Errors = append(pkg.Errors, packages.Error{Msg: err.Error()})
 		},
 	}
+	typecheckStart := time.Now()
 	checkedPkg, err := conf.Check(pkgPath, l.fset, syntax, info)
+	logTiming(l.ctx, "incremental.local_fastpath.typecheck", typecheckStart)
 	if checkedPkg != nil {
 		pkg.Types = checkedPkg
 		l.imported[pkgPath] = checkedPkg
@@ -422,6 +495,7 @@ func (l *localFastPathLoader) parseFileForFastPath(name string, mode parser.Mode
 
 func (l *localFastPathLoader) reloadWithoutBodyStripping(pkgPath string, files []string, mode parser.Mode, pkg *packages.Package) (*packages.Package, error) {
 	syntax := make([]*ast.File, 0, len(files))
+	parseStart := time.Now()
 	for _, name := range files {
 		file, err := parser.ParseFile(l.fset, name, nil, mode)
 		if err != nil {
@@ -429,6 +503,7 @@ func (l *localFastPathLoader) reloadWithoutBodyStripping(pkgPath string, files [
 		}
 		syntax = append(syntax, file)
 	}
+	logTiming(l.ctx, "incremental.local_fastpath.parse_retry", parseStart)
 	pkg.Syntax = syntax
 	pkg.Errors = nil
 	pkg.TypesInfo = newFastPathTypesInfo(pkgPath == l.rootPkgPath)
@@ -442,7 +517,9 @@ func (l *localFastPathLoader) reloadWithoutBodyStripping(pkgPath string, files [
 			pkg.Errors = append(pkg.Errors, packages.Error{Msg: err.Error()})
 		},
 	}
+	typecheckStart := time.Now()
 	checkedPkg, err := conf.Check(pkgPath, l.fset, syntax, pkg.TypesInfo)
+	logTiming(l.ctx, "incremental.local_fastpath.typecheck_retry", typecheckStart)
 	if checkedPkg != nil {
 		pkg.Types = checkedPkg
 		l.imported[pkgPath] = checkedPkg
@@ -471,13 +548,29 @@ func (l *localFastPathLoader) shouldRetryWithoutBodyStripping(pkgPath string, er
 
 func (l *localFastPathLoader) importPackage(path string) (*types.Package, error) {
 	if l.shouldImportFromExport(path) {
-		return l.importExportPackage(path)
+		pkg, err := l.importExportPackage(path)
+		if err == nil {
+			return pkg, nil
+		}
+		// Cached local export artifacts are an optimization only. If one is
+		// missing or corrupted, fall back to source loading for correctness.
+		if _, ok := l.localExports[path]; ok && l.meta[path] != nil {
+			delete(l.localExports, path)
+			pkg, loadErr := l.load(path)
+			if loadErr == nil {
+				l.refreshLocalExport(path, pkg)
+				return pkg.Types, nil
+			}
+			return nil, loadErr
+		}
+		return nil, err
 	}
 	if l.meta[path] != nil {
 		pkg, err := l.load(path)
 		if err != nil {
 			return nil, err
 		}
+		l.refreshLocalExport(path, pkg)
 		return pkg.Types, nil
 	}
 	if l.externalImp == nil {
@@ -536,7 +629,20 @@ func (l *localFastPathLoader) importExportPackage(path string) (*types.Package, 
 	if l == nil {
 		return nil, fmt.Errorf("missing local fast path loader")
 	}
-	if pkg := l.imported[path]; pkg != nil {
+	if pkg := l.imported[path]; pkg != nil && pkg.Complete() {
+		return pkg, nil
+	}
+	if exportPath := l.localExports[path]; exportPath != "" {
+		f, err := os.Open(exportPath)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		pkg, err := gcexportdata.Read(f, l.fset, l.imported, path)
+		if err != nil {
+			return nil, err
+		}
+		l.imported[path] = pkg
 		return pkg, nil
 	}
 	if l.externalImp == nil {
@@ -544,6 +650,13 @@ func (l *localFastPathLoader) importExportPackage(path string) (*types.Package, 
 	}
 	pkg, err := l.externalImp.Import(path)
 	if err != nil {
+		if l.externalFallback != nil && strings.Contains(err.Error(), "missing external export data for ") {
+			pkg, fallbackErr := l.externalFallback.Import(path)
+			if fallbackErr == nil {
+				l.imported[path] = pkg
+				return pkg, nil
+			}
+		}
 		return nil, err
 	}
 	l.imported[path] = pkg
@@ -557,8 +670,24 @@ func (l *localFastPathLoader) shouldImportFromExport(pkgPath string) bool {
 	if _, source := l.sourcePkgs[pkgPath]; source {
 		return false
 	}
-	_, ok := l.summaries[pkgPath]
+	if _, ok := l.localExports[pkgPath]; ok {
+		return true
+	}
+	_, ok := l.externalMeta[pkgPath]
 	return ok
+}
+
+func (l *localFastPathLoader) refreshLocalExport(pkgPath string, pkg *packages.Package) {
+	if l == nil || pkg == nil || pkg.Fset == nil || pkg.Types == nil {
+		return
+	}
+	fp := l.meta[pkgPath]
+	exportPath := localExportPathForFingerprint(l.wd, l.tags, fp)
+	if exportPath == "" {
+		return
+	}
+	writeLocalPackageExportFile(exportPath, pkg.Fset, pkg.Types)
+	l.localExports[pkgPath] = exportPath
 }
 
 func (l *localFastPathLoader) markSourceClosure() {
@@ -802,14 +931,15 @@ func writeIncrementalManifestFromState(wd string, env []string, patterns []strin
 	if snapshot == nil || len(generated) == 0 || state == nil || state.manifest == nil {
 		return
 	}
+	scope := runCacheScope(wd, patterns)
 	manifest := &incrementalManifest{
 		Version:       incrementalManifestVersion,
-		WD:            filepath.Clean(wd),
+		WD:            scope,
 		Tags:          opts.Tags,
 		Prefix:        opts.PrefixOutputFile,
 		HeaderHash:    headerHash(opts.Header),
 		EnvHash:       envHash(env),
-		Patterns:      sortedStrings(patterns),
+		Patterns:      normalizePatternsForScope(wd, packageCacheScope(wd), patterns),
 		LocalPackages: snapshotPackageFingerprints(snapshot),
 		ExternalPkgs:  append([]externalPackageExport(nil), state.manifest.ExternalPkgs...),
 		ExternalFiles: append([]cacheFile(nil), state.manifest.ExternalFiles...),
@@ -841,7 +971,7 @@ func writeIncrementalGraphFromSnapshot(wd string, tags string, roots []string, f
 	}
 	graph := &incrementalGraph{
 		Version:      incrementalGraphVersion,
-		WD:           filepath.Clean(wd),
+		WD:           packageCacheScope(wd),
 		Tags:         tags,
 		Roots:        append([]string(nil), roots...),
 		LocalReverse: make(map[string][]string),

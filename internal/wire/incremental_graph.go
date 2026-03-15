@@ -58,7 +58,7 @@ func buildIncrementalGraph(wd string, tags string, pkgs []*packages.Package) *in
 	moduleRoot := findModuleRoot(wd)
 	graph := &incrementalGraph{
 		Version:      incrementalGraphVersion,
-		WD:           filepath.Clean(wd),
+		WD:           packageCacheScope(wd),
 		Tags:         tags,
 		Roots:        make([]string, 0, len(pkgs)),
 		LocalReverse: make(map[string][]string),
@@ -126,7 +126,7 @@ func incrementalGraphKey(wd string, tags string, roots []string) string {
 	h := sha256.New()
 	h.Write([]byte(incrementalGraphVersion))
 	h.Write([]byte{0})
-	h.Write([]byte(filepath.Clean(wd)))
+	h.Write([]byte(packageCacheScope(wd)))
 	h.Write([]byte{0})
 	h.Write([]byte(tags))
 	h.Write([]byte{0})

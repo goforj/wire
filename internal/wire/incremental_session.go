@@ -46,7 +46,7 @@ func clearIncrementalSessions() {
 
 func sessionKey(wd string, env []string, tags string) string {
 	var b strings.Builder
-	b.WriteString(filepath.Clean(wd))
+	b.WriteString(packageCacheScope(wd))
 	b.WriteByte('\n')
 	b.WriteString(tags)
 	b.WriteByte('\n')

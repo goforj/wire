@@ -41,6 +41,44 @@ func TestPackageShapeHashIgnoresFunctionBodies(t *testing.T) {
 	}
 }
 
+func TestPackageShapeHashIgnoresConstValueChanges(t *testing.T) {
+	dir := t.TempDir()
+	file := writeTempFile(t, dir, "pkg.go", "package p\n\nconst SQLText = \"a\"\n")
+	hash1, err := packageShapeHash([]string{file})
+	if err != nil {
+		t.Fatalf("packageShapeHash first failed: %v", err)
+	}
+	if err := os.WriteFile(file, []byte("package p\n\nconst SQLText = \"b\"\n"), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+	hash2, err := packageShapeHash([]string{file})
+	if err != nil {
+		t.Fatalf("packageShapeHash second failed: %v", err)
+	}
+	if hash1 != hash2 {
+		t.Fatalf("const-value change should not affect shape hash: %q vs %q", hash1, hash2)
+	}
+}
+
+func TestPackageShapeHashIgnoresImplementationOnlyImportChanges(t *testing.T) {
+	dir := t.TempDir()
+	file := writeTempFile(t, dir, "pkg.go", "package p\n\nfunc Hello() string { return \"a\" }\n")
+	hash1, err := packageShapeHash([]string{file})
+	if err != nil {
+		t.Fatalf("packageShapeHash first failed: %v", err)
+	}
+	if err := os.WriteFile(file, []byte("package p\n\nimport \"fmt\"\n\nfunc Hello() string { return fmt.Sprint(\"a\") }\n"), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+	hash2, err := packageShapeHash([]string{file})
+	if err != nil {
+		t.Fatalf("packageShapeHash second failed: %v", err)
+	}
+	if hash1 != hash2 {
+		t.Fatalf("implementation-only import change should not affect shape hash: %q vs %q", hash1, hash2)
+	}
+}
+
 func TestIncrementalFingerprintRoundTrip(t *testing.T) {
 	fp := &packageFingerprint{
 		Version:      incrementalFingerprintVersion,

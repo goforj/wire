@@ -18,7 +18,9 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"sync"
 
 	"golang.org/x/tools/go/packages"
 )
@@ -209,17 +211,69 @@ func cacheMetaMatches(meta *cacheMeta, pkg *packages.Package, opts *GenerateOpti
 
 // buildCacheFiles converts file paths into cache metadata entries.
 func buildCacheFiles(files []string) ([]cacheFile, error) {
-	out := make([]cacheFile, 0, len(files))
-	for _, name := range files {
-		info, err := osStat(name)
+	return buildCacheFilesWithStats(files, func(path string) (cacheFile, error) {
+		info, err := osStat(path)
+		if err != nil {
+			return cacheFile{}, err
+		}
+		return cacheFile{
+			Path:    filepath.Clean(path),
+			Size:    info.Size(),
+			ModTime: info.ModTime().UnixNano(),
+		}, nil
+	})
+}
+
+func buildCacheFilesWithStats[T any](items []T, stat func(T) (cacheFile, error)) ([]cacheFile, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	if len(items) == 1 {
+		file, err := stat(items[0])
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, cacheFile{
-			Path:    filepath.Clean(name),
-			Size:    info.Size(),
-			ModTime: info.ModTime().UnixNano(),
-		})
+		return []cacheFile{file}, nil
+	}
+	out := make([]cacheFile, len(items))
+	workers := runtime.GOMAXPROCS(0)
+	if workers < 4 {
+		workers = 4
+	}
+	if workers > len(items) {
+		workers = len(items)
+	}
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		firstErr error
+		indexCh  = make(chan int, len(items))
+	)
+	for i := range items {
+		indexCh <- i
+	}
+	close(indexCh)
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for i := range indexCh {
+				file, err := stat(items[i])
+				if err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					mu.Unlock()
+					continue
+				}
+				out[i] = file
+			}
+		}()
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	return out, nil
 }

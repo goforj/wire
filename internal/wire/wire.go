@@ -154,9 +154,13 @@ func Generate(ctx context.Context, wd string, env []string, patterns []string, o
 				snapshot := buildIncrementalManifestSnapshotFromPackages(wd, opts.Tags, incrementalManifestPackages(pkgs, loader))
 				writeIncrementalManifestWithOptions(wd, env, patterns, opts, incrementalManifestPackages(pkgs, loader), snapshot, generated, false)
 				if snapshot != nil {
+					writeLocalPackageExports(wd, opts.Tags, incrementalManifestPackages(pkgs, loader), snapshot.fingerprints)
 					writeIncrementalGraphFromSnapshot(wd, opts.Tags, manifestOutputPkgPathsFromGenerated(generated), snapshot.fingerprints)
+					loader.fingerprints = snapshot
 				}
+				writeIncrementalPackageSummaries(loader, pkgs)
 			} else {
+				writeLocalPackageExports(wd, opts.Tags, incrementalManifestPackages(pkgs, loader), loader.fingerprints.fingerprints)
 				writeIncrementalPackageSummaries(loader, pkgs)
 				writeIncrementalManifest(wd, env, patterns, opts, incrementalManifestPackages(pkgs, loader), loader.fingerprints, generated)
 			}

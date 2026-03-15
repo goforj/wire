@@ -31,7 +31,7 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
-const incrementalFingerprintVersion = "wire-incremental-v1"
+const incrementalFingerprintVersion = "wire-incremental-v3"
 
 type packageFingerprint struct {
 	Version      string
@@ -39,6 +39,8 @@ type packageFingerprint struct {
 	Tags         string
 	PkgPath      string
 	Files        []cacheFile
+	Dirs         []cacheFile
+	ContentHash  string
 	ShapeHash    string
 	LocalImports []string
 }
@@ -159,10 +161,12 @@ func buildIncrementalManifestSnapshotFromPackages(wd string, tags string, pkgs [
 		sort.Strings(localImports)
 		snapshot.fingerprints[pkg.PkgPath] = &packageFingerprint{
 			Version:      incrementalFingerprintVersion,
-			WD:           filepath.Clean(wd),
+			WD:           packageCacheScope(wd),
 			Tags:         tags,
 			PkgPath:      pkg.PkgPath,
 			Files:        metaFiles,
+			Dirs:         mustBuildPackageDirCacheFiles(files),
+			ContentHash:  mustHashPackageFiles(files),
 			ShapeHash:    shapeHash,
 			LocalImports: localImports,
 		}
@@ -183,11 +187,52 @@ func packageFingerprintFiles(pkg *packages.Package) []string {
 	return append([]string(nil), pkg.GoFiles...)
 }
 
+func packageFingerprintDirs(files []string) []string {
+	if len(files) == 0 {
+		return nil
+	}
+	dirs := make([]string, 0, len(files))
+	seen := make(map[string]struct{}, len(files))
+	for _, name := range files {
+		dir := filepath.Clean(filepath.Dir(name))
+		if _, ok := seen[dir]; ok {
+			continue
+		}
+		seen[dir] = struct{}{}
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+	return dirs
+}
+
+func mustBuildPackageDirCacheFiles(files []string) []cacheFile {
+	dirs := packageFingerprintDirs(files)
+	if len(dirs) == 0 {
+		return nil
+	}
+	meta, err := buildCacheFiles(dirs)
+	if err != nil {
+		return nil
+	}
+	return meta
+}
+
+func mustHashPackageFiles(files []string) string {
+	if len(files) == 0 {
+		return ""
+	}
+	hash, err := hashFiles(files)
+	if err != nil {
+		return ""
+	}
+	return hash
+}
+
 func incrementalFingerprintEquivalent(a, b *packageFingerprint) bool {
 	if a == nil || b == nil {
 		return false
 	}
-	if a.ShapeHash != b.ShapeHash || a.PkgPath != b.PkgPath || a.Tags != b.Tags || filepath.Clean(a.WD) != filepath.Clean(b.WD) {
+	if a.ShapeHash != b.ShapeHash || a.PkgPath != b.PkgPath || a.Tags != b.Tags || a.WD != b.WD {
 		return false
 	}
 	if len(a.LocalImports) != len(b.LocalImports) {
@@ -205,7 +250,7 @@ func incrementalFingerprintMetaMatches(prev *packageFingerprint, wd string, tags
 	if prev == nil || prev.Version != incrementalFingerprintVersion {
 		return false
 	}
-	if filepath.Clean(prev.WD) != filepath.Clean(wd) || prev.Tags != tags || prev.PkgPath != pkgPath {
+	if prev.WD != packageCacheScope(wd) || prev.Tags != tags || prev.PkgPath != pkgPath {
 		return false
 	}
 	if len(prev.Files) != len(files) {
@@ -234,10 +279,12 @@ func buildPackageFingerprint(wd string, tags string, pkg *packages.Package, file
 	sort.Strings(localImports)
 	return &packageFingerprint{
 		Version:      incrementalFingerprintVersion,
-		WD:           filepath.Clean(wd),
+		WD:           packageCacheScope(wd),
 		Tags:         tags,
 		PkgPath:      pkg.PkgPath,
 		Files:        append([]cacheFile(nil), files...),
+		Dirs:         mustBuildPackageDirCacheFiles(packageFingerprintFiles(pkg)),
+		ContentHash:  mustHashPackageFiles(packageFingerprintFiles(pkg)),
 		ShapeHash:    shapeHash,
 		LocalImports: localImports,
 	}, nil
@@ -278,6 +325,7 @@ func writeSyntaxShapeHash(buf *bytes.Buffer, fset *token.FileSet, file *ast.File
 	if file == nil || buf == nil || fset == nil {
 		return
 	}
+	usedImports := usedImportNamesInShape(file)
 	if file.Name != nil {
 		buf.WriteString("package ")
 		buf.WriteString(file.Name.Name)
@@ -294,11 +342,120 @@ func writeSyntaxShapeHash(buf *bytes.Buffer, fset *token.FileSet, file *ast.File
 			buf.WriteByte(' ')
 			writeNodeHash(buf, fset, decl.Type)
 			buf.WriteByte('\n')
+		case *ast.GenDecl:
+			if writeGenDeclShapeHash(buf, fset, decl, usedImports) {
+				buf.WriteByte('\n')
+			}
 		default:
 			writeNodeHash(buf, fset, decl)
 			buf.WriteByte('\n')
 		}
 	}
+}
+
+func writeGenDeclShapeHash(buf *bytes.Buffer, fset *token.FileSet, decl *ast.GenDecl, usedImports map[string]struct{}) bool {
+	if buf == nil || fset == nil || decl == nil {
+		return false
+	}
+	var specBuf bytes.Buffer
+	wrote := false
+	for _, spec := range decl.Specs {
+		switch spec := spec.(type) {
+		case *ast.ImportSpec:
+			name := importName(spec)
+			if name == "_" || name == "." {
+				if spec.Name != nil {
+					specBuf.WriteString(spec.Name.Name)
+				}
+				specBuf.WriteByte(' ')
+				writeNodeHash(&specBuf, fset, spec.Path)
+				specBuf.WriteByte('\n')
+				wrote = true
+				break
+			}
+			if _, ok := usedImports[name]; !ok {
+				continue
+			}
+			if spec.Name != nil {
+				specBuf.WriteString(spec.Name.Name)
+			}
+			specBuf.WriteByte(' ')
+			writeNodeHash(&specBuf, fset, spec.Path)
+		case *ast.TypeSpec:
+			if spec.Name != nil {
+				specBuf.WriteString(spec.Name.Name)
+			}
+			specBuf.WriteByte(' ')
+			writeNodeHash(&specBuf, fset, spec.Type)
+		case *ast.ValueSpec:
+			for _, name := range spec.Names {
+				if name != nil {
+					specBuf.WriteString(name.Name)
+				}
+				specBuf.WriteByte(' ')
+			}
+			if spec.Type != nil {
+				writeNodeHash(&specBuf, fset, spec.Type)
+			}
+		default:
+			writeNodeHash(&specBuf, fset, spec)
+		}
+		specBuf.WriteByte('\n')
+		wrote = true
+	}
+	if !wrote {
+		return false
+	}
+	buf.WriteString(decl.Tok.String())
+	buf.WriteByte(' ')
+	buf.Write(specBuf.Bytes())
+	return true
+}
+
+func usedImportNamesInShape(file *ast.File) map[string]struct{} {
+	used := make(map[string]struct{})
+	if file == nil {
+		return used
+	}
+	record := func(node ast.Node) {
+		ast.Inspect(node, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			ident, ok := sel.X.(*ast.Ident)
+			if !ok || ident.Name == "" {
+				return true
+			}
+			used[ident.Name] = struct{}{}
+			return true
+		})
+	}
+	for _, decl := range file.Decls {
+		switch decl := decl.(type) {
+		case *ast.FuncDecl:
+			if decl.Recv != nil {
+				record(decl.Recv)
+			}
+			if decl.Type != nil {
+				record(decl.Type)
+			}
+		case *ast.GenDecl:
+			for _, spec := range decl.Specs {
+				switch spec := spec.(type) {
+				case *ast.TypeSpec:
+					if spec.Type != nil {
+						record(spec.Type)
+					}
+				case *ast.ValueSpec:
+					if spec.Type != nil {
+						record(spec.Type)
+					}
+				}
+			}
+		}
+	}
+	return used
 }
 
 func writeNodeHash(buf *bytes.Buffer, fset *token.FileSet, node interface{}) {
@@ -324,7 +481,7 @@ func incrementalFingerprintKey(wd string, tags string, pkgPath string) string {
 	h := sha256.New()
 	h.Write([]byte(incrementalFingerprintVersion))
 	h.Write([]byte{0})
-	h.Write([]byte(filepath.Clean(wd)))
+	h.Write([]byte(packageCacheScope(wd)))
 	h.Write([]byte{0})
 	h.Write([]byte(tags))
 	h.Write([]byte{0})

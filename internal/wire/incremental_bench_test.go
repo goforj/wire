@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -17,6 +19,38 @@ const (
 )
 
 var largeBenchmarkSizes = []int{10, 100, 1000}
+
+type incrementalScenarioBenchmarkCase struct {
+	name    string
+	mutate  func(tb testing.TB, root string)
+	measure func(tb testing.TB, root string, env []string, ctx context.Context) incrementalScenarioTrace
+	wantErr bool
+}
+
+type incrementalScenarioTrace struct {
+	total  time.Duration
+	labels map[string]time.Duration
+}
+
+type incrementalScenarioBudget struct {
+	total            time.Duration
+	validateLocal    time.Duration
+	validateExt      time.Duration
+	validateTouch    time.Duration
+	validateTouchHit time.Duration
+	outputs          time.Duration
+	generateLoad     time.Duration
+	localFastpath    time.Duration
+}
+
+type largeRepoPerformanceBudget struct {
+	shapeTotal  time.Duration
+	localLoad   time.Duration
+	parse       time.Duration
+	typecheck   time.Duration
+	generate    time.Duration
+	knownToggle time.Duration
+}
 
 func BenchmarkGenerateIncrementalFirstSeenShapeChange(b *testing.B) {
 	cacheHooksMu.Lock()
@@ -74,6 +108,129 @@ func BenchmarkGenerateIncrementalFirstSeenShapeChange(b *testing.B) {
 		if len(gens) != 1 || len(gens[0].Errs) > 0 {
 			b.Fatalf("unexpected Generate results: %+v", gens)
 		}
+	}
+}
+
+func BenchmarkGenerateIncrementalScenarioMatrix(b *testing.B) {
+	cacheHooksMu.Lock()
+	state := saveCacheHooks()
+	b.Cleanup(func() {
+		restoreCacheHooks(state)
+		cacheHooksMu.Unlock()
+	})
+
+	repoRoot := benchmarkRepoRoot(b)
+	for _, scenario := range incrementalScenarioBenchmarks() {
+		scenario := scenario
+		b.Run(scenario.name, func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				b.StartTimer()
+				_ = measureIncrementalScenarioOnce(b, repoRoot, scenario)
+				b.StopTimer()
+			}
+		})
+	}
+}
+
+func TestPrintIncrementalScenarioBenchmarkTable(t *testing.T) {
+	if os.Getenv("WIRE_BENCH_SCENARIOS") == "" {
+		t.Skip("set WIRE_BENCH_SCENARIOS=1 to print the incremental scenario benchmark table")
+	}
+
+	cacheHooksMu.Lock()
+	state := saveCacheHooks()
+	t.Cleanup(func() {
+		restoreCacheHooks(state)
+		cacheHooksMu.Unlock()
+	})
+
+	repoRoot := benchmarkRepoRoot(t)
+	rows := [][]string{{
+		"scenario",
+		"total",
+		"local pkgs",
+		"external",
+		"touched",
+		"touch hit",
+		"outputs",
+		"gen load",
+		"local fastpath",
+	}}
+	for _, scenario := range incrementalScenarioBenchmarks() {
+		trace := measureIncrementalScenarioOnce(t, repoRoot, scenario)
+		rows = append(rows, []string{
+			scenario.name,
+			formatBenchmarkDuration(trace.total),
+			formatBenchmarkDuration(trace.label("incremental.preload_manifest.validate_local_packages")),
+			formatBenchmarkDuration(trace.label("incremental.preload_manifest.validate_external_files")),
+			formatBenchmarkDuration(trace.label("incremental.preload_manifest.validate_touched")),
+			formatBenchmarkDuration(trace.label("incremental.preload_manifest.validate_touched_cache_hit")),
+			formatBenchmarkDuration(trace.label("incremental.preload_manifest.outputs")),
+			formatBenchmarkDuration(trace.label("generate.load")),
+			formatBenchmarkDuration(trace.label("incremental.local_fastpath.load")),
+		})
+	}
+	fmt.Print(renderASCIITable(rows))
+}
+
+func TestIncrementalScenarioPerformanceBudgets(t *testing.T) {
+	if os.Getenv("WIRE_PERF_BUDGETS") == "" {
+		t.Skip("set WIRE_PERF_BUDGETS=1 to enforce incremental scenario performance budgets")
+	}
+
+	cacheHooksMu.Lock()
+	state := saveCacheHooks()
+	t.Cleanup(func() {
+		restoreCacheHooks(state)
+		cacheHooksMu.Unlock()
+	})
+
+	repoRoot := benchmarkRepoRoot(t)
+	budgets := incrementalScenarioPerformanceBudgets()
+	for _, scenario := range incrementalScenarioBenchmarks() {
+		scenario := scenario
+		budget, ok := budgets[scenario.name]
+		if !ok {
+			t.Fatalf("missing performance budget for scenario %q", scenario.name)
+		}
+		t.Run(scenario.name, func(t *testing.T) {
+			trace := measureIncrementalScenarioMedian(t, repoRoot, scenario, 5)
+			assertScenarioBudget(t, trace, budget)
+		})
+	}
+}
+
+func TestLargeRepoPerformanceBudgets(t *testing.T) {
+	if os.Getenv("WIRE_PERF_BUDGETS") == "" {
+		t.Skip("set WIRE_PERF_BUDGETS=1 to enforce incremental scenario performance budgets")
+	}
+
+	cacheHooksMu.Lock()
+	state := saveCacheHooks()
+	t.Cleanup(func() {
+		restoreCacheHooks(state)
+		cacheHooksMu.Unlock()
+	})
+
+	repoRoot := benchmarkRepoRoot(t)
+	budgets := largeRepoPerformanceBudgets()
+	for _, packageCount := range largeBenchmarkSizes {
+		packageCount := packageCount
+		budget, ok := budgets[packageCount]
+		if !ok {
+			t.Fatalf("missing large-repo performance budget for size %d", packageCount)
+		}
+		t.Run(strconv.Itoa(packageCount), func(t *testing.T) {
+			trace := measureLargeRepoShapeChangeTraceMedian(t, repoRoot, packageCount, true, 3)
+			checkBudgetDuration(t, "shape_total", trace.total, budget.shapeTotal)
+			checkBudgetDuration(t, "local_fastpath_load", trace.label("incremental.local_fastpath.load"), budget.localLoad)
+			checkBudgetDuration(t, "parse", trace.label("incremental.local_fastpath.parse"), budget.parse)
+			checkBudgetDuration(t, "typecheck", trace.label("incremental.local_fastpath.typecheck"), budget.typecheck)
+			checkBudgetDuration(t, "generate", trace.label("incremental.local_fastpath.generate"), budget.generate)
+
+			knownToggle := measureLargeRepoKnownToggleMedian(t, repoRoot, packageCount, 3)
+			checkBudgetDuration(t, "known_toggle", knownToggle, budget.knownToggle)
+		})
 	}
 }
 
@@ -164,8 +321,10 @@ func TestPrintLargeRepoShapeChangeBreakdownTable(t *testing.T) {
 		"old typed load",
 		"new total",
 		"new local load",
-		"new cached sets",
+		"new parse",
+		"new typecheck",
 		"new injector solve",
+		"new format",
 		"new generate",
 		"speedup",
 	}}
@@ -179,8 +338,10 @@ func TestPrintLargeRepoShapeChangeBreakdownTable(t *testing.T) {
 			formatBenchmarkDuration(normal.label("load.packages.lazy.load")),
 			formatBenchmarkDuration(incremental.total),
 			formatBenchmarkDuration(incremental.label("incremental.local_fastpath.load")),
-			formatBenchmarkDuration(incremental.label("incremental.local_fastpath.summary_resolve")),
+			formatBenchmarkDuration(incremental.label("incremental.local_fastpath.parse")),
+			formatBenchmarkDuration(incremental.label("incremental.local_fastpath.typecheck")),
 			formatBenchmarkDuration(incremental.label("generate.package.example.com/app/app.injectors")),
+			formatBenchmarkDuration(incremental.label("generate.package.example.com/app/app.format")),
 			formatBenchmarkDuration(incremental.label("incremental.local_fastpath.generate")),
 			fmt.Sprintf("%.2fx", speedupRatio(normal.total, incremental.total)),
 		})
@@ -314,6 +475,576 @@ func runLargeRepoShapeChangeBenchmarks(b *testing.B, incremental bool) {
 	}
 }
 
+func incrementalScenarioBenchmarks() []incrementalScenarioBenchmarkCase {
+	return []incrementalScenarioBenchmarkCase{
+		{
+			name:   "preload_unchanged",
+			mutate: func(testing.TB, string) {},
+		},
+		{
+			name: "preload_whitespace_only_change",
+			mutate: func(tb testing.TB, root string) {
+				writeBenchmarkFile(tb, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+					"package dep",
+					"",
+					"const SQLText = \"green\"",
+					"",
+					"var defaultCount = 1",
+					"",
+					"type Foo struct { Message string }",
+					"",
+					"func NewMessage() string { return SQLText }",
+					"",
+					"func helper(msg string) string { return msg }",
+					"",
+					"",
+					"func New(msg string) *Foo {",
+					"",
+					"\treturn &Foo{Message: helper(msg)}",
+					"",
+					"}",
+					"",
+				}, "\n"))
+			},
+		},
+		{
+			name: "preload_body_only_change",
+			mutate: func(tb testing.TB, root string) {
+				writeBenchmarkFile(tb, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+					"package dep",
+					"",
+					"const SQLText = \"green\"",
+					"",
+					"var defaultCount = 1",
+					"",
+					"type Foo struct { Message string }",
+					"",
+					"func NewMessage() string {",
+					"\treturn helper(SQLText)",
+					"}",
+					"",
+					"func helper(msg string) string { return msg }",
+					"",
+					"func New(msg string) *Foo {",
+					"\treturn &Foo{Message: helper(msg)}",
+					"}",
+					"",
+				}, "\n"))
+			},
+		},
+		{
+			name: "preload_body_only_repeat_change",
+			measure: func(tb testing.TB, root string, env []string, ctx context.Context) incrementalScenarioTrace {
+				writeBodyOnlyScenarioVariant(tb, root, "b")
+				if _, errs := Generate(ctx, root, env, []string{"./app"}, &GenerateOptions{}); len(errs) > 0 {
+					tb.Fatalf("warm changed variant Generate returned errors: %v", errs)
+				}
+				writeBodyOnlyScenarioVariant(tb, root, "a")
+				if _, errs := Generate(ctx, root, env, []string{"./app"}, &GenerateOptions{}); len(errs) > 0 {
+					tb.Fatalf("reset variant Generate returned errors: %v", errs)
+				}
+				writeBodyOnlyScenarioVariant(tb, root, "b")
+				trace := incrementalScenarioTrace{labels: make(map[string]time.Duration)}
+				timedCtx := WithTiming(ctx, func(label string, dur time.Duration) {
+					trace.labels[label] += dur
+				})
+				start := time.Now()
+				gens, errs := Generate(timedCtx, root, env, []string{"./app"}, &GenerateOptions{})
+				trace.total = time.Since(start)
+				if len(errs) > 0 {
+					tb.Fatalf("%s: Generate returned errors: %v", "preload_body_only_repeat_change", errs)
+				}
+				if len(gens) != 1 || len(gens[0].Errs) > 0 {
+					tb.Fatalf("%s: unexpected Generate results: %+v", "preload_body_only_repeat_change", gens)
+				}
+				return trace
+			},
+		},
+		{
+			name: "local_fastpath_method_body_change",
+			mutate: func(tb testing.TB, root string) {
+				writeBenchmarkFile(tb, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+					"package dep",
+					"",
+					"const SQLText = \"green\"",
+					"",
+					"var defaultCount = 1",
+					"",
+					"type Foo struct { Message string }",
+					"",
+					"func (f Foo) Summary() string {",
+					"\treturn helper(f.Message)",
+					"}",
+					"",
+					"func NewMessage() string { return SQLText }",
+					"",
+					"func helper(msg string) string { return msg }",
+					"",
+					"func New(msg string) *Foo {",
+					"\treturn &Foo{Message: msg}",
+					"}",
+					"",
+				}, "\n"))
+			},
+		},
+		{
+			name: "preload_const_value_change",
+			mutate: func(tb testing.TB, root string) {
+				writeBenchmarkFile(tb, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+					"package dep",
+					"",
+					"const SQLText = \"blue\"",
+					"",
+					"var defaultCount = 1",
+					"",
+					"type Foo struct { Message string }",
+					"",
+					"func NewMessage() string { return SQLText }",
+					"",
+					"func helper(msg string) string { return msg }",
+					"",
+					"func New(msg string) *Foo {",
+					"\treturn &Foo{Message: helper(msg)}",
+					"}",
+					"",
+				}, "\n"))
+			},
+		},
+		{
+			name: "preload_var_initializer_change",
+			mutate: func(tb testing.TB, root string) {
+				writeBenchmarkFile(tb, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+					"package dep",
+					"",
+					"const SQLText = \"green\"",
+					"",
+					"var defaultCount = 2",
+					"",
+					"type Foo struct { Message string }",
+					"",
+					"func NewMessage() string { return SQLText }",
+					"",
+					"func helper(msg string) string { return msg }",
+					"",
+					"func New(msg string) *Foo {",
+					"\treturn &Foo{Message: helper(msg)}",
+					"}",
+					"",
+				}, "\n"))
+			},
+		},
+		{
+			name: "local_fastpath_add_top_level_helper",
+			mutate: func(tb testing.TB, root string) {
+				writeBenchmarkFile(tb, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+					"package dep",
+					"",
+					"const SQLText = \"green\"",
+					"",
+					"var defaultCount = 1",
+					"",
+					"type Foo struct { Message string }",
+					"",
+					"func NewMessage() string { return SQLText }",
+					"",
+					"func helper(msg string) string { return msg }",
+					"",
+					"func NewTag() string { return \"tag\" }",
+					"",
+					"func New(msg string) *Foo {",
+					"\treturn &Foo{Message: helper(msg)}",
+					"}",
+					"",
+				}, "\n"))
+			},
+		},
+		{
+			name: "preload_import_only_implementation_change",
+			mutate: func(tb testing.TB, root string) {
+				writeBenchmarkFile(tb, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+					"package dep",
+					"",
+					"import \"fmt\"",
+					"",
+					"const SQLText = \"green\"",
+					"",
+					"var defaultCount = 1",
+					"",
+					"type Foo struct { Message string }",
+					"",
+					"func NewMessage() string { return SQLText }",
+					"",
+					"func helper(msg string) string { return fmt.Sprint(msg) }",
+					"",
+					"func New(msg string) *Foo {",
+					"\treturn &Foo{Message: helper(msg)}",
+					"}",
+					"",
+				}, "\n"))
+			},
+		},
+		{
+			name: "local_fastpath_signature_change",
+			mutate: func(tb testing.TB, root string) {
+				writeBenchmarkFile(tb, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+					"package dep",
+					"",
+					"const SQLText = \"green\"",
+					"",
+					"var defaultCount = 7",
+					"",
+					"type Foo struct {",
+					"\tMessage string",
+					"\tCount   int",
+					"}",
+					"",
+					"func NewMessage() string { return SQLText }",
+					"",
+					"func NewCount() int { return defaultCount }",
+					"",
+					"func helper(msg string) string { return msg }",
+					"",
+					"func New(msg string, count int) *Foo {",
+					"\treturn &Foo{Message: helper(msg), Count: count}",
+					"}",
+					"",
+				}, "\n"))
+				writeBenchmarkFile(tb, filepath.Join(root, "dep", "wire.go"), strings.Join([]string{
+					"package dep",
+					"",
+					"import \"github.com/goforj/wire\"",
+					"",
+					"var NewSet = wire.NewSet(NewMessage, NewCount, New)",
+					"",
+				}, "\n"))
+			},
+		},
+		{
+			name: "local_fastpath_struct_field_addition",
+			mutate: func(tb testing.TB, root string) {
+				writeBenchmarkFile(tb, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+					"package dep",
+					"",
+					"const SQLText = \"green\"",
+					"",
+					"var defaultCount = 1",
+					"",
+					"type Foo struct {",
+					"\tMessage string",
+					"\tCount   int",
+					"}",
+					"",
+					"func NewMessage() string { return SQLText }",
+					"",
+					"func helper(msg string) string { return msg }",
+					"",
+					"func New(msg string) *Foo {",
+					"\treturn &Foo{Message: helper(msg), Count: defaultCount}",
+					"}",
+					"",
+				}, "\n"))
+			},
+		},
+		{
+			name: "local_fastpath_interface_method_addition",
+			mutate: func(tb testing.TB, root string) {
+				writeBenchmarkFile(tb, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+					"package dep",
+					"",
+					"const SQLText = \"green\"",
+					"",
+					"var defaultCount = 1",
+					"",
+					"type Fooer interface {",
+					"\tMessage() string",
+					"\tCount() int",
+					"}",
+					"",
+					"type Foo struct { Message string }",
+					"",
+					"func NewMessage() string { return SQLText }",
+					"",
+					"func helper(msg string) string { return msg }",
+					"",
+					"func New(msg string) *Foo {",
+					"\treturn &Foo{Message: helper(msg)}",
+					"}",
+					"",
+				}, "\n"))
+			},
+		},
+		{
+			name: "fallback_invalid_body_change",
+			mutate: func(tb testing.TB, root string) {
+				writeBenchmarkFile(tb, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+					"package dep",
+					"",
+					"const SQLText = \"green\"",
+					"",
+					"var defaultCount = 1",
+					"",
+					"type Foo struct { Message string }",
+					"",
+					"func NewMessage() string { return missing }",
+					"",
+					"func helper(msg string) string { return msg }",
+					"",
+					"func New(msg string) *Foo {",
+					"\treturn &Foo{Message: helper(msg)}",
+					"}",
+					"",
+				}, "\n"))
+			},
+			wantErr: true,
+		},
+	}
+}
+
+func incrementalScenarioPerformanceBudgets() map[string]incrementalScenarioBudget {
+	return map[string]incrementalScenarioBudget{
+		"preload_unchanged": {
+			total:         300 * time.Millisecond,
+			validateLocal: 25 * time.Millisecond,
+			validateExt:   25 * time.Millisecond,
+			validateTouch: 5 * time.Millisecond,
+			outputs:       5 * time.Millisecond,
+		},
+		"preload_whitespace_only_change": {
+			total:         300 * time.Millisecond,
+			validateLocal: 25 * time.Millisecond,
+			validateExt:   25 * time.Millisecond,
+			validateTouch: 250 * time.Millisecond,
+			outputs:       5 * time.Millisecond,
+		},
+		"preload_body_only_change": {
+			total:         400 * time.Millisecond,
+			validateLocal: 40 * time.Millisecond,
+			validateExt:   40 * time.Millisecond,
+			validateTouch: 250 * time.Millisecond,
+			outputs:       5 * time.Millisecond,
+		},
+		"preload_body_only_repeat_change": {
+			total:            150 * time.Millisecond,
+			validateLocal:    40 * time.Millisecond,
+			validateExt:      40 * time.Millisecond,
+			validateTouch:    5 * time.Millisecond,
+			validateTouchHit: 5 * time.Millisecond,
+			outputs:          5 * time.Millisecond,
+		},
+		"local_fastpath_method_body_change": {
+			total:         500 * time.Millisecond,
+			validateLocal: 60 * time.Millisecond,
+			validateExt:   60 * time.Millisecond,
+			localFastpath: 300 * time.Millisecond,
+		},
+		"preload_import_only_implementation_change": {
+			total:         150 * time.Millisecond,
+			validateLocal: 40 * time.Millisecond,
+			validateExt:   40 * time.Millisecond,
+			validateTouch: 50 * time.Millisecond,
+			outputs:       5 * time.Millisecond,
+		},
+		"preload_const_value_change": {
+			total:         400 * time.Millisecond,
+			validateLocal: 40 * time.Millisecond,
+			validateExt:   40 * time.Millisecond,
+			validateTouch: 250 * time.Millisecond,
+			outputs:       5 * time.Millisecond,
+		},
+		"preload_var_initializer_change": {
+			total:         400 * time.Millisecond,
+			validateLocal: 40 * time.Millisecond,
+			validateExt:   40 * time.Millisecond,
+			validateTouch: 250 * time.Millisecond,
+			outputs:       5 * time.Millisecond,
+		},
+		"local_fastpath_add_top_level_helper": {
+			total:         500 * time.Millisecond,
+			validateLocal: 60 * time.Millisecond,
+			validateExt:   60 * time.Millisecond,
+			localFastpath: 300 * time.Millisecond,
+		},
+		"local_fastpath_signature_change": {
+			total:         500 * time.Millisecond,
+			validateLocal: 60 * time.Millisecond,
+			validateExt:   60 * time.Millisecond,
+			localFastpath: 300 * time.Millisecond,
+		},
+		"local_fastpath_struct_field_addition": {
+			total:         500 * time.Millisecond,
+			validateLocal: 60 * time.Millisecond,
+			validateExt:   60 * time.Millisecond,
+			localFastpath: 300 * time.Millisecond,
+		},
+		"local_fastpath_interface_method_addition": {
+			total:         500 * time.Millisecond,
+			validateLocal: 60 * time.Millisecond,
+			validateExt:   60 * time.Millisecond,
+			localFastpath: 300 * time.Millisecond,
+		},
+		"fallback_invalid_body_change": {
+			total:        800 * time.Millisecond,
+			generateLoad: 500 * time.Millisecond,
+		},
+	}
+}
+
+func measureIncrementalScenarioOnce(tb testing.TB, repoRoot string, scenario incrementalScenarioBenchmarkCase) incrementalScenarioTrace {
+	tb.Helper()
+
+	cacheRoot := tb.TempDir()
+	osTempDir = func() string { return cacheRoot }
+
+	root := tb.TempDir()
+	writeIncrementalScenarioBenchmarkModule(tb, repoRoot, root)
+
+	env := append(os.Environ(), "GOWORK=off")
+	ctx := WithIncremental(context.Background(), true)
+
+	if _, errs := Generate(ctx, root, env, []string{"./app"}, &GenerateOptions{}); len(errs) > 0 {
+		tb.Fatalf("baseline Generate returned errors: %v", errs)
+	}
+
+	if scenario.measure != nil {
+		return scenario.measure(tb, root, env, ctx)
+	}
+
+	scenario.mutate(tb, root)
+
+	trace := incrementalScenarioTrace{labels: make(map[string]time.Duration)}
+	timedCtx := WithTiming(ctx, func(label string, dur time.Duration) {
+		trace.labels[label] += dur
+	})
+	start := time.Now()
+	gens, errs := Generate(timedCtx, root, env, []string{"./app"}, &GenerateOptions{})
+	trace.total = time.Since(start)
+
+	if scenario.wantErr {
+		if len(errs) == 0 {
+			tb.Fatalf("%s: expected Generate errors", scenario.name)
+		}
+		if len(gens) != 0 {
+			tb.Fatalf("%s: expected no generated results on error, got %+v", scenario.name, gens)
+		}
+		return trace
+	}
+
+	if len(errs) > 0 {
+		tb.Fatalf("%s: Generate returned errors: %v", scenario.name, errs)
+	}
+	if len(gens) != 1 || len(gens[0].Errs) > 0 {
+		tb.Fatalf("%s: unexpected Generate results: %+v", scenario.name, gens)
+	}
+	return trace
+}
+
+func writeIncrementalScenarioBenchmarkModule(tb testing.TB, repoRoot string, root string) {
+	tb.Helper()
+
+	writeBenchmarkFile(tb, filepath.Join(root, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require github.com/goforj/wire v0.0.0",
+		"replace github.com/goforj/wire => " + repoRoot,
+		"",
+	}, "\n"))
+
+	writeBenchmarkFile(tb, filepath.Join(root, "app", "wire.go"), strings.Join([]string{
+		"//go:build wireinject",
+		"// +build wireinject",
+		"",
+		"package app",
+		"",
+		"import (",
+		"\t\"example.com/app/dep\"",
+		"\t\"github.com/goforj/wire\"",
+		")",
+		"",
+		"func Init() *dep.Foo {",
+		"\twire.Build(dep.NewSet)",
+		"\treturn nil",
+		"}",
+		"",
+	}, "\n"))
+
+	writeBodyOnlyScenarioVariant(tb, root, "green")
+}
+
+func writeBodyOnlyScenarioVariant(tb testing.TB, root string, value string) {
+	tb.Helper()
+	writeBenchmarkFile(tb, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"const SQLText = \"" + value + "\"",
+		"",
+		"var defaultCount = 1",
+		"",
+		"type Foo struct { Message string }",
+		"",
+		"func NewMessage() string { return SQLText }",
+		"",
+		"func helper(msg string) string { return msg }",
+		"",
+		"func New(msg string) *Foo {",
+		"\treturn &Foo{Message: helper(msg)}",
+		"}",
+		"",
+	}, "\n"))
+
+	writeBenchmarkFile(tb, filepath.Join(root, "dep", "wire.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"import \"github.com/goforj/wire\"",
+		"",
+		"var NewSet = wire.NewSet(NewMessage, New)",
+		"",
+	}, "\n"))
+}
+
+func measureIncrementalScenarioMedian(tb testing.TB, repoRoot string, scenario incrementalScenarioBenchmarkCase, samples int) incrementalScenarioTrace {
+	tb.Helper()
+	if samples <= 0 {
+		samples = 1
+	}
+	traces := make([]incrementalScenarioTrace, 0, samples)
+	for i := 0; i < samples; i++ {
+		traces = append(traces, measureIncrementalScenarioOnce(tb, repoRoot, scenario))
+	}
+	sort.Slice(traces, func(i, j int) bool { return traces[i].total < traces[j].total })
+	return traces[len(traces)/2]
+}
+
+func assertScenarioBudget(t *testing.T, trace incrementalScenarioTrace, budget incrementalScenarioBudget) {
+	t.Helper()
+	checkBudgetDuration(t, "total", trace.total, budget.total)
+	checkBudgetDuration(t, "validate_local_packages", trace.label("incremental.preload_manifest.validate_local_packages"), budget.validateLocal)
+	checkBudgetDuration(t, "validate_external_files", trace.label("incremental.preload_manifest.validate_external_files"), budget.validateExt)
+	checkBudgetDuration(t, "validate_touched", trace.label("incremental.preload_manifest.validate_touched"), budget.validateTouch)
+	checkBudgetDuration(t, "validate_touched_cache_hit", trace.label("incremental.preload_manifest.validate_touched_cache_hit"), budget.validateTouchHit)
+	checkBudgetDuration(t, "outputs", trace.label("incremental.preload_manifest.outputs"), budget.outputs)
+	checkBudgetDuration(t, "generate_load", trace.label("generate.load"), budget.generateLoad)
+	checkBudgetDuration(t, "local_fastpath_load", trace.label("incremental.local_fastpath.load"), budget.localFastpath)
+}
+
+func checkBudgetDuration(t *testing.T, name string, got time.Duration, max time.Duration) {
+	t.Helper()
+	if max <= 0 {
+		return
+	}
+	if got > max {
+		t.Fatalf("%s exceeded budget: got=%s max=%s", name, got, max)
+	}
+}
+
+func (s incrementalScenarioTrace) label(name string) time.Duration {
+	if s.labels == nil {
+		return 0
+	}
+	return s.labels[name]
+}
+
 type largeRepoBenchmarkRow struct {
 	packageCount    int
 	coldNormal      time.Duration
@@ -326,6 +1057,35 @@ type largeRepoBenchmarkRow struct {
 type shapeChangeTrace struct {
 	total  time.Duration
 	labels map[string]time.Duration
+}
+
+func largeRepoPerformanceBudgets() map[int]largeRepoPerformanceBudget {
+	return map[int]largeRepoPerformanceBudget{
+		10: {
+			shapeTotal:  45 * time.Millisecond,
+			localLoad:   3 * time.Millisecond,
+			parse:       500 * time.Microsecond,
+			typecheck:   4 * time.Millisecond,
+			generate:    3 * time.Millisecond,
+			knownToggle: 3 * time.Millisecond,
+		},
+		100: {
+			shapeTotal:  35 * time.Millisecond,
+			localLoad:   20 * time.Millisecond,
+			parse:       1500 * time.Microsecond,
+			typecheck:   12 * time.Millisecond,
+			generate:    20 * time.Millisecond,
+			knownToggle: 15 * time.Millisecond,
+		},
+		1000: {
+			shapeTotal:  260 * time.Millisecond,
+			localLoad:   110 * time.Millisecond,
+			parse:       4 * time.Millisecond,
+			typecheck:   70 * time.Millisecond,
+			generate:    180 * time.Millisecond,
+			knownToggle: 90 * time.Millisecond,
+		},
+	}
 }
 
 func measureLargeRepoShapeChangeOnce(tb testing.TB, repoRoot string, packageCount int, incremental bool) time.Duration {
@@ -392,6 +1152,19 @@ func measureLargeRepoShapeChangeTraceOnce(tb testing.TB, repoRoot string, packag
 		tb.Fatalf("unexpected Generate results: %+v", gens)
 	}
 	return trace
+}
+
+func measureLargeRepoShapeChangeTraceMedian(tb testing.TB, repoRoot string, packageCount int, incremental bool, samples int) shapeChangeTrace {
+	tb.Helper()
+	if samples <= 0 {
+		samples = 1
+	}
+	traces := make([]shapeChangeTrace, 0, samples)
+	for i := 0; i < samples; i++ {
+		traces = append(traces, measureLargeRepoShapeChangeTraceOnce(tb, repoRoot, packageCount, incremental))
+	}
+	sort.Slice(traces, func(i, j int) bool { return traces[i].total < traces[j].total })
+	return traces[len(traces)/2]
 }
 
 func (s shapeChangeTrace) label(name string) time.Duration {
@@ -466,6 +1239,19 @@ func measureLargeRepoKnownToggleOnce(tb testing.TB, repoRoot string, packageCoun
 	return dur
 }
 
+func measureLargeRepoKnownToggleMedian(tb testing.TB, repoRoot string, packageCount int, samples int) time.Duration {
+	tb.Helper()
+	if samples <= 0 {
+		samples = 1
+	}
+	values := make([]time.Duration, 0, samples)
+	for i := 0; i < samples; i++ {
+		values = append(values, measureLargeRepoKnownToggleOnce(tb, repoRoot, packageCount))
+	}
+	sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
+	return values[len(values)/2]
+}
+
 func formatPercentImprovement(normal time.Duration, incremental time.Duration) string {
 	if normal <= 0 {
 		return "0.0%"
@@ -488,7 +1274,7 @@ func formatBenchmarkDuration(d time.Duration) string {
 	case d >= time.Millisecond:
 		return fmt.Sprintf("%.2fms", float64(d)/float64(time.Millisecond))
 	case d >= time.Microsecond:
-		return fmt.Sprintf("%.2fµs", float64(d)/float64(time.Microsecond))
+		return fmt.Sprintf("%.2fus", float64(d)/float64(time.Microsecond))
 	default:
 		return d.String()
 	}
@@ -674,8 +1460,8 @@ func renderASCIITable(rows [][]string) string {
 	widths := make([]int, len(rows[0]))
 	for _, row := range rows {
 		for i, cell := range row {
-			if len(cell) > widths[i] {
-				widths[i] = len(cell)
+			if width := utf8.RuneCountInString(cell); width > widths[i] {
+				widths[i] = width
 			}
 		}
 	}
@@ -693,7 +1479,7 @@ func renderASCIITable(rows [][]string) string {
 		for i, cell := range row {
 			b.WriteByte(' ')
 			b.WriteString(cell)
-			b.WriteString(strings.Repeat(" ", widths[i]-len(cell)+1))
+			b.WriteString(strings.Repeat(" ", widths[i]-utf8.RuneCountInString(cell)+1))
 			b.WriteByte('|')
 		}
 		b.WriteByte('\n')
