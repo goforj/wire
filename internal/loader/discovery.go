@@ -34,6 +34,9 @@ type goListRequest struct {
 }
 
 func runGoList(ctx context.Context, req goListRequest) (map[string]*packageMeta, error) {
+	if cached, ok := readDiscoveryCache(req); ok {
+		return cached, nil
+	}
 	args := []string{"list", "-json", "-e", "-compiled", "-export"}
 	if req.NeedDeps {
 		args = append(args, "-deps")
@@ -91,5 +94,6 @@ func runGoList(ctx context.Context, req goListRequest) (map[string]*packageMeta,
 		copyMeta := meta
 		out[meta.ImportPath] = &copyMeta
 	}
+	writeDiscoveryCache(req, out)
 	return out, nil
 }

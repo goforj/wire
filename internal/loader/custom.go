@@ -29,6 +29,7 @@ import (
 	"runtime/pprof"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/tools/go/gcexportdata"
@@ -82,7 +83,16 @@ type customTypedGraphLoader struct {
 	importer          types.Importer
 	loading           map[string]bool
 	isLocalCache      map[string]bool
+	localSemanticOK   map[string]bool
+	artifactPrefetch  map[string]artifactPrefetchEntry
 	stats             typedLoadStats
+}
+
+type artifactPrefetchEntry struct {
+	path string
+	data []byte
+	err  error
+	ok   bool
 }
 
 type typedLoadStats struct {
@@ -106,6 +116,9 @@ type typedLoadStats struct {
 	artifactDecode     time.Duration
 	artifactImportLink time.Duration
 	artifactWrite      time.Duration
+	artifactPrefetch   time.Duration
+	rootLoad           time.Duration
+	discovery          time.Duration
 	artifactHits       int
 	artifactMisses     int
 	artifactWrites     int
@@ -225,6 +238,7 @@ func loadTypedPackageGraphCustom(ctx context.Context, req LazyLoadRequest) (*Laz
 		meta map[string]*packageMeta
 		err  error
 	)
+	discoveryStart := time.Now()
 	if req.Discovery != nil && len(req.Discovery.meta) > 0 {
 		meta = req.Discovery.meta
 	} else {
@@ -239,6 +253,7 @@ func loadTypedPackageGraphCustom(ctx context.Context, req LazyLoadRequest) (*Laz
 			return nil, err
 		}
 	}
+	discoveryDuration := time.Since(discoveryStart)
 	if len(meta) == 0 {
 		return nil, unsupportedError{reason: "empty go list result"}
 	}
@@ -259,12 +274,19 @@ func loadTypedPackageGraphCustom(ctx context.Context, req LazyLoadRequest) (*Laz
 		importer:          importerpkg.ForCompiler(token.NewFileSet(), "gc", nil),
 		loading:           make(map[string]bool, len(meta)),
 		isLocalCache:      make(map[string]bool, len(meta)),
-		stats:             typedLoadStats{},
+		localSemanticOK:   make(map[string]bool, len(meta)),
+		artifactPrefetch:  make(map[string]artifactPrefetchEntry, len(meta)),
+		stats:             typedLoadStats{discovery: discoveryDuration},
 	}
+	prefetchStart := time.Now()
+	l.prefetchArtifacts()
+	l.stats.artifactPrefetch = time.Since(prefetchStart)
+	rootLoadStart := time.Now()
 	root, err := l.loadPackage(req.Package)
 	if err != nil {
 		return nil, err
 	}
+	l.stats.rootLoad = time.Since(rootLoadStart)
 	logDuration(ctx, "loader.custom.lazy.read_files.cumulative", l.stats.read)
 	logDuration(ctx, "loader.custom.lazy.parse_files.cumulative", l.stats.parse)
 	logDuration(ctx, "loader.custom.lazy.typecheck.cumulative", l.stats.typecheck)
@@ -279,6 +301,9 @@ func loadTypedPackageGraphCustom(ctx context.Context, req LazyLoadRequest) (*Laz
 	logDuration(ctx, "loader.custom.lazy.artifact_decode", l.stats.artifactDecode)
 	logDuration(ctx, "loader.custom.lazy.artifact_import_link", l.stats.artifactImportLink)
 	logDuration(ctx, "loader.custom.lazy.artifact_write", l.stats.artifactWrite)
+	logDuration(ctx, "loader.custom.lazy.artifact_prefetch.wall", l.stats.artifactPrefetch)
+	logDuration(ctx, "loader.custom.lazy.root_load.wall", l.stats.rootLoad)
+	logDuration(ctx, "loader.custom.lazy.discovery.wall", l.stats.discovery)
 	logInt(ctx, "loader.custom.lazy.artifact_hits", l.stats.artifactHits)
 	logInt(ctx, "loader.custom.lazy.artifact_misses", l.stats.artifactMisses)
 	logInt(ctx, "loader.custom.lazy.artifact_writes", l.stats.artifactWrites)
@@ -289,6 +314,7 @@ func loadTypedPackageGraphCustom(ctx context.Context, req LazyLoadRequest) (*Laz
 }
 
 func loadPackagesCustom(ctx context.Context, req PackageLoadRequest) (*PackageLoadResult, error) {
+	discoveryStart := time.Now()
 	meta, err := runGoList(ctx, goListRequest{
 		WD:       req.WD,
 		Env:      req.Env,
@@ -299,6 +325,7 @@ func loadPackagesCustom(ctx context.Context, req PackageLoadRequest) (*PackageLo
 	if err != nil {
 		return nil, err
 	}
+	discoveryDuration := time.Since(discoveryStart)
 	if len(meta) == 0 {
 		return nil, unsupportedError{reason: "empty go list result"}
 	}
@@ -329,8 +356,14 @@ func loadPackagesCustom(ctx context.Context, req PackageLoadRequest) (*PackageLo
 		importer:          importerpkg.ForCompiler(token.NewFileSet(), "gc", nil),
 		loading:           make(map[string]bool, len(meta)),
 		isLocalCache:      make(map[string]bool, len(meta)),
-		stats:             typedLoadStats{},
+		localSemanticOK:   make(map[string]bool, len(meta)),
+		artifactPrefetch:  make(map[string]artifactPrefetchEntry, len(meta)),
+		stats:             typedLoadStats{discovery: discoveryDuration},
 	}
+	prefetchStart := time.Now()
+	l.prefetchArtifacts()
+	l.stats.artifactPrefetch = time.Since(prefetchStart)
+	rootLoadStart := time.Now()
 	roots := make([]*packages.Package, 0, len(targets))
 	for _, m := range meta {
 		if m.DepOnly {
@@ -342,6 +375,7 @@ func loadPackagesCustom(ctx context.Context, req PackageLoadRequest) (*PackageLo
 		}
 		roots = append(roots, root)
 	}
+	l.stats.rootLoad = time.Since(rootLoadStart)
 	sort.Slice(roots, func(i, j int) bool { return roots[i].PkgPath < roots[j].PkgPath })
 	logDuration(ctx, "loader.custom.typed.read_files.cumulative", l.stats.read)
 	logDuration(ctx, "loader.custom.typed.parse_files.cumulative", l.stats.parse)
@@ -357,6 +391,9 @@ func loadPackagesCustom(ctx context.Context, req PackageLoadRequest) (*PackageLo
 	logDuration(ctx, "loader.custom.typed.artifact_decode", l.stats.artifactDecode)
 	logDuration(ctx, "loader.custom.typed.artifact_import_link", l.stats.artifactImportLink)
 	logDuration(ctx, "loader.custom.typed.artifact_write", l.stats.artifactWrite)
+	logDuration(ctx, "loader.custom.typed.artifact_prefetch.wall", l.stats.artifactPrefetch)
+	logDuration(ctx, "loader.custom.typed.root_load.wall", l.stats.rootLoad)
+	logDuration(ctx, "loader.custom.typed.discovery.wall", l.stats.discovery)
 	logInt(ctx, "loader.custom.typed.artifact_hits", l.stats.artifactHits)
 	logInt(ctx, "loader.custom.typed.artifact_misses", l.stats.artifactMisses)
 	logInt(ctx, "loader.custom.typed.artifact_writes", l.stats.artifactWrites)
@@ -527,7 +564,7 @@ func (l *customTypedGraphLoader) loadPackage(path string) (*packages.Package, er
 		}
 		l.packages[path] = pkg
 	}
-	useArtifact := loaderArtifactEnabled(l.env) && !isTarget && (!isLocal || l.useLocalSemanticArtifact(meta))
+	useArtifact := l.shouldUseArtifact(path, meta, isTarget, isLocal)
 	if useArtifact {
 		if typed, ok := l.readArtifact(path, meta, isLocal); ok {
 			linkStart := time.Now()
@@ -641,10 +678,15 @@ func (l *customTypedGraphLoader) useLocalSemanticArtifact(meta *packageMeta) boo
 	if meta == nil {
 		return false
 	}
+	if ok, exists := l.localSemanticOK[meta.ImportPath]; exists {
+		return ok
+	}
 	art, err := semanticcache.Read(l.env, meta.ImportPath, meta.Name, metaFiles(meta))
 	if err != nil || art == nil {
+		l.localSemanticOK[meta.ImportPath] = false
 		return false
 	}
+	l.localSemanticOK[meta.ImportPath] = art.Supported
 	return art.Supported
 }
 
@@ -659,14 +701,26 @@ func (l *customTypedGraphLoader) checkFiles(path string, checker *types.Checker,
 
 func (l *customTypedGraphLoader) readArtifact(path string, meta *packageMeta, isLocal bool) (*types.Package, bool) {
 	start := time.Now()
-	pathStart := time.Now()
-	artifactPath, err := loaderArtifactPath(l.env, meta, isLocal)
-	l.stats.artifactPath += time.Since(pathStart)
-	if err != nil {
-		debugf(l.ctx, "loader.artifact.read_miss pkg=%s local=%t reason=path_error err=%v", path, isLocal, err)
-		l.stats.artifactRead += time.Since(start)
-		l.stats.artifactMisses++
-		return nil, false
+	entry, prefetched := l.artifactPrefetch[path]
+	artifactPath := ""
+	if prefetched {
+		artifactPath = entry.path
+		if entry.err != nil {
+			debugf(l.ctx, "loader.artifact.read_miss pkg=%s local=%t reason=prefetch_error err=%v", path, isLocal, entry.err)
+			l.stats.artifactMisses++
+			return nil, false
+		}
+	} else {
+		pathStart := time.Now()
+		var err error
+		artifactPath, err = loaderArtifactPath(l.env, meta, isLocal)
+		l.stats.artifactPath += time.Since(pathStart)
+		if err != nil {
+			debugf(l.ctx, "loader.artifact.read_miss pkg=%s local=%t reason=path_error err=%v", path, isLocal, err)
+			l.stats.artifactRead += time.Since(start)
+			l.stats.artifactMisses++
+			return nil, false
+		}
 	}
 	if isLocal {
 		preloadStart := time.Now()
@@ -690,7 +744,12 @@ func (l *customTypedGraphLoader) readArtifact(path string, meta *packageMeta, is
 	}
 	var tpkg *types.Package
 	decodeStart := time.Now()
-	tpkg, err = readLoaderArtifact(artifactPath, l.fset, l.typesPkgs, path)
+	var err error
+	if prefetched {
+		tpkg, err = readLoaderArtifactData(entry.data, l.fset, l.typesPkgs, path)
+	} else {
+		tpkg, err = readLoaderArtifact(artifactPath, l.fset, l.typesPkgs, path)
+	}
 	l.stats.artifactDecode += time.Since(decodeStart)
 	if err != nil {
 		debugf(l.ctx, "loader.artifact.read_miss pkg=%s local=%t reason=decode_error err=%v", path, isLocal, err)
@@ -698,10 +757,90 @@ func (l *customTypedGraphLoader) readArtifact(path string, meta *packageMeta, is
 		l.stats.artifactMisses++
 		return nil, false
 	}
-	l.stats.artifactRead += time.Since(start)
+	if !prefetched {
+		l.stats.artifactRead += time.Since(start)
+	}
 	l.stats.artifactHits++
 	l.typesPkgs[path] = tpkg
 	return tpkg, true
+}
+
+func (l *customTypedGraphLoader) shouldUseArtifact(path string, meta *packageMeta, isTarget, isLocal bool) bool {
+	if !loaderArtifactEnabled(l.env) || isTarget {
+		return false
+	}
+	if !isLocal {
+		return true
+	}
+	return l.useLocalSemanticArtifact(meta)
+}
+
+func (l *customTypedGraphLoader) prefetchArtifacts() {
+	if !loaderArtifactEnabled(l.env) {
+		return
+	}
+	candidates := make([]string, 0, len(l.meta))
+	for path, meta := range l.meta {
+		_, isTarget := l.targets[path]
+		isLocal := l.isLocalPackage(path, meta)
+		if l.shouldUseArtifact(path, meta, isTarget, isLocal) {
+			candidates = append(candidates, path)
+		}
+	}
+	sort.Strings(candidates)
+	if len(candidates) == 0 {
+		return
+	}
+	type result struct {
+		pkg   string
+		entry artifactPrefetchEntry
+		dur   time.Duration
+	}
+	jobs := make(chan string, len(candidates))
+	results := make(chan result, len(candidates))
+	workers := 8
+	if len(candidates) < workers {
+		workers = len(candidates)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for path := range jobs {
+				start := time.Now()
+				meta := l.meta[path]
+				isLocal := l.isLocalPackage(path, meta)
+				artifactPath, err := loaderArtifactPath(l.env, meta, isLocal)
+				entry := artifactPrefetchEntry{path: artifactPath}
+				if err == nil {
+					data, readErr := os.ReadFile(artifactPath)
+					if readErr != nil {
+						entry.err = readErr
+					} else {
+						entry.data = data
+						entry.ok = true
+					}
+				} else {
+					entry.err = err
+				}
+				results <- result{pkg: path, entry: entry, dur: time.Since(start)}
+			}
+		}()
+	}
+	for _, path := range candidates {
+		jobs <- path
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+	for res := range results {
+		l.artifactPrefetch[res.pkg] = res.entry
+		l.stats.artifactRead += res.dur
+		pathStart := time.Now()
+		_ = res.entry.path
+		l.stats.artifactPath += time.Since(pathStart)
+	}
 }
 
 func (l *customTypedGraphLoader) writeArtifact(meta *packageMeta, pkg *types.Package, isLocal bool) error {
