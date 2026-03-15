@@ -333,18 +333,18 @@ func TestAllFields(t *testing.T) {
 	}
 }
 
-func TestObjectCacheEnsurePackage(t *testing.T) {
+func TestNewObjectCacheRegistersPackages(t *testing.T) {
 	t.Parallel()
 
 	fset := token.NewFileSet()
 	pkg := &packages.Package{PkgPath: "example.com/p", Fset: fset}
-	oc := newObjectCache([]*packages.Package{pkg}, nil)
+	oc := newObjectCache([]*packages.Package{pkg})
 
-	if got, errs := oc.ensurePackage(pkg.PkgPath); len(errs) != 0 || got != pkg {
-		t.Fatalf("expected existing package without errors, got pkg=%v errs=%v", got, errs)
+	if got := oc.packages[pkg.PkgPath]; got != pkg {
+		t.Fatalf("expected package to be registered, got %v", got)
 	}
-	if _, errs := oc.ensurePackage("missing.example.com"); len(errs) == 0 {
-		t.Fatal("expected missing package error")
+	if got := oc.packages["missing.example.com"]; got != nil {
+		t.Fatalf("expected missing package to remain absent, got %v", got)
 	}
 }
 

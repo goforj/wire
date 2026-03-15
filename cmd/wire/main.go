@@ -35,8 +35,6 @@ import (
 	"github.com/google/subcommands"
 )
 
-var topLevelIncremental optionalBoolFlag
-
 const (
 	ansiRed    = "\033[1;31m"
 	ansiGreen  = "\033[1;32m"
@@ -52,12 +50,10 @@ func main() {
 	subcommands.Register(subcommands.FlagsCommand(), "")
 	subcommands.Register(subcommands.HelpCommand(), "")
 	subcommands.Register(&checkCmd{}, "")
-	subcommands.Register(&cacheCmd{}, "")
 	subcommands.Register(&diffCmd{}, "")
 	subcommands.Register(&genCmd{}, "")
 	subcommands.Register(&watchCmd{}, "")
 	subcommands.Register(&showCmd{}, "")
-	addIncrementalFlag(&topLevelIncremental, flag.CommandLine)
 	flag.Parse()
 
 	// Initialize the default logger to log to stderr.
@@ -74,7 +70,6 @@ func main() {
 		"help":     true, // builtin
 		"flags":    true, // builtin
 		"check":    true,
-		"cache":    true,
 		"diff":     true,
 		"gen":      true,
 		"serve":    true,
@@ -84,9 +79,9 @@ func main() {
 	// Default to running the "gen" command.
 	if args := flag.Args(); len(args) == 0 || !allCmds[args[0]] {
 		genCmd := &genCmd{}
-		os.Exit(int(genCmd.Execute(topLevelIncremental.apply(context.Background()), flag.CommandLine)))
+		os.Exit(int(genCmd.Execute(context.Background(), flag.CommandLine)))
 	}
-	os.Exit(int(subcommands.Execute(topLevelIncremental.apply(context.Background()))))
+	os.Exit(int(subcommands.Execute(context.Background())))
 }
 
 // installStackDumper registers signal handlers to dump goroutine stacks.

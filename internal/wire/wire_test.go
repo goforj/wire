@@ -26,6 +26,7 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -481,6 +482,7 @@ func isIdent(s string) bool {
 // "C:\GOPATH" and running on Windows, the string
 // "C:\GOPATH\src\foo\bar.go:15:4" would be rewritten to "foo/bar.go:x:y".
 func scrubError(gopath string, s string) string {
+	s = normalizeHeaderRelativeError(s)
 	sb := new(strings.Builder)
 	query := gopath + string(os.PathSeparator) + "src" + string(os.PathSeparator)
 	for {
@@ -517,7 +519,106 @@ func scrubError(gopath string, s string) string {
 		sb.WriteString(linecol)
 		s = s[linecolLen:]
 	}
-	return sb.String()
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+func normalizeHeaderRelativeError(s string) string {
+	const headerPrefix = "-: # "
+	if !strings.HasPrefix(s, headerPrefix) {
+		return s
+	}
+	pkgAndRest := strings.TrimPrefix(s, headerPrefix)
+	newline := strings.IndexByte(pkgAndRest, '\n')
+	if newline == -1 {
+		return s
+	}
+	pkg := strings.TrimSpace(pkgAndRest[:newline])
+	rest := strings.TrimLeft(pkgAndRest[newline+1:], "\n")
+	if pkg == "" || rest == "" {
+		return s
+	}
+
+	firstLineEnd := strings.IndexByte(rest, '\n')
+	if firstLineEnd == -1 {
+		firstLineEnd = len(rest)
+	}
+	firstLine := rest[:firstLineEnd]
+	rewritten, ok := canonicalizeRelativeErrorPath(pkg, firstLine)
+	if !ok {
+		return s
+	}
+	return normalizeLegacyUndefinedQualifiedName(rewritten + rest[firstLineEnd:])
+}
+
+func canonicalizeRelativeErrorPath(pkg, line string) (string, bool) {
+	goExt := strings.Index(line, ".go")
+	if goExt == -1 {
+		return "", false
+	}
+	goExt += len(".go")
+	linecol, n := scrubLineColumn(line[goExt:])
+	if n == 0 {
+		return "", false
+	}
+	file := line[:goExt]
+	suffix := line[goExt+n:]
+	file = strings.ReplaceAll(file, "\\", "/")
+	file = strings.TrimPrefix(file, "./")
+	file = strings.TrimPrefix(file, "/")
+	baseDir := path.Base(pkg)
+	if strings.HasPrefix(file, pkg+"/") {
+		return file + linecol + suffix, true
+	}
+	if strings.HasPrefix(file, baseDir+"/") {
+		file = pkg + "/" + strings.TrimPrefix(file, baseDir+"/")
+		return file + linecol + suffix, true
+	}
+	if !strings.Contains(file, "/") {
+		return pkg + "/" + file + linecol + suffix, true
+	}
+	return "", false
+}
+
+func normalizeLegacyUndefinedQualifiedName(s string) string {
+	const marker = ": undefined: "
+	idx := strings.Index(s, marker)
+	if idx == -1 {
+		return s
+	}
+	qualified := s[idx+len(marker):]
+	end := len(qualified)
+	for i, r := range qualified {
+		if r == '\n' || r == '\r' || r == '\t' || r == ' ' {
+			end = i
+			break
+		}
+	}
+	qualified = qualified[:end]
+	dot := strings.IndexByte(qualified, '.')
+	if dot == -1 || dot == 0 || dot == len(qualified)-1 {
+		return s
+	}
+	pkgName := qualified[:dot]
+	name := qualified[dot+1:]
+	if name == "" || !isLowerIdent(name) {
+		return s
+	}
+	return s[:idx] + ": name " + name + " not exported by package " + pkgName
+}
+
+func isLowerIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if i == 0 && !unicode.IsLower(r) {
+			return false
+		}
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func scrubLineColumn(s string) (replacement string, n int) {
@@ -569,6 +670,24 @@ func filterLegacyCompilerErrors(errs []string) []string {
 		filtered = append(filtered, err)
 	}
 	return filtered
+}
+
+func TestScrubErrorCanonicalizesHeaderRelativePath(t *testing.T) {
+	const gopath = "/tmp/wire_test"
+	got := scrubError(gopath, "-: # example.com/foo\nfoo/wire.go:26:33: not enough arguments in call to wire.InterfaceValue")
+	want := "example.com/foo/wire.go:x:y: not enough arguments in call to wire.InterfaceValue"
+	if got != want {
+		t.Fatalf("scrubError() = %q, want %q", got, want)
+	}
+}
+
+func TestScrubErrorCanonicalizesHeaderRootRelativePath(t *testing.T) {
+	const gopath = "/tmp/wire_test"
+	got := scrubError(gopath, "-: # example.com/foo\n/wire.go:27:17: name foo not exported by package bar")
+	want := "example.com/foo/wire.go:x:y: name foo not exported by package bar"
+	if got != want {
+		t.Fatalf("scrubError() = %q, want %q", got, want)
+	}
 }
 
 type testCase struct {

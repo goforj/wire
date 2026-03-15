@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"os"
@@ -30,6 +31,8 @@ import (
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/types/typeutil"
+
+	"github.com/goforj/wire/internal/loader"
 )
 
 // A providerSetSrc captures the source for a type provided by a ProviderSet.
@@ -250,11 +253,8 @@ type Field struct {
 // In case of duplicate environment variables, the last one in the list
 // takes precedence.
 func Load(ctx context.Context, wd string, env []string, tags string, patterns []string) (*Info, []error) {
-	if IncrementalEnabled(ctx, env) {
-		debugf(ctx, "incremental=enabled")
-	}
 	loadStart := time.Now()
-	pkgs, loader, errs := load(ctx, wd, env, tags, patterns)
+	pkgs, errs := load(ctx, wd, env, tags, patterns)
 	logTiming(ctx, "load.packages", loadStart)
 	if len(errs) > 0 {
 		return nil, errs
@@ -267,18 +267,12 @@ func Load(ctx context.Context, wd string, env []string, tags string, patterns []
 		Fset: fset,
 		Sets: make(map[ProviderSetID]*ProviderSet),
 	}
-	oc := newObjectCache(pkgs, loader)
+	oc := newObjectCache(pkgs)
 	ec := new(errorCollector)
 	for _, pkg := range pkgs {
 		if isWireImport(pkg.PkgPath) {
 			// The marker function package confuses analysis.
 			continue
-		}
-		if loaded, errs := oc.ensurePackage(pkg.PkgPath); len(errs) > 0 {
-			ec.add(errs...)
-			continue
-		} else if loaded != nil {
-			pkg = loaded
 		}
 		pkgStart := time.Now()
 		scope := pkg.Types.Scope()
@@ -367,68 +361,48 @@ func Load(ctx context.Context, wd string, env []string, tags string, patterns []
 // env is nil or empty, it is interpreted as an empty set of variables.
 // In case of duplicate environment variables, the last one in the list
 // takes precedence.
-func load(ctx context.Context, wd string, env []string, tags string, patterns []string) ([]*packages.Package, *lazyLoader, []error) {
-	var session *incrementalSession
+func load(ctx context.Context, wd string, env []string, tags string, patterns []string) ([]*packages.Package, []error) {
 	fset := token.NewFileSet()
-	if IncrementalEnabled(ctx, env) {
-		session = getIncrementalSession(wd, env, tags)
-		fset = session.fset
-		debugf(ctx, "incremental session=enabled")
-	}
-	baseCfg := &packages.Config{
-		Context:    ctx,
-		Mode:       baseLoadMode(ctx),
-		Dir:        wd,
+	loaderMode := effectiveLoaderMode(ctx, wd, env)
+	parseStats := &parseFileStats{}
+	loadStart := time.Now()
+	result, err := loader.New().LoadPackages(withLoaderTiming(ctx), loader.PackageLoadRequest{
+		WD:         wd,
 		Env:        env,
-		BuildFlags: []string{"-tags=wireinject"},
+		Tags:       tags,
+		Patterns:   append([]string(nil), patterns...),
+		Mode:       packages.LoadAllSyntax,
+		LoaderMode: loaderMode,
 		Fset:       fset,
+		ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+			start := time.Now()
+			file, err := parser.ParseFile(fset, filename, src, parser.ParseComments|parser.SkipObjectResolution)
+			parseStats.record(false, time.Since(start), err, false)
+			return file, err
+		},
+	})
+	logTiming(ctx, "load.packages.load", loadStart)
+	var typedPkgs []*packages.Package
+	if result != nil {
+		typedPkgs = result.Packages
+		debugf(ctx, "load.packages.backend=%s", result.Backend)
+		if result.FallbackReason != loader.FallbackReasonNone {
+			debugf(ctx, "load.packages.fallback_reason=%s", result.FallbackReason)
+			if result.FallbackDetail != "" {
+				debugf(ctx, "load.packages.fallback_detail=%s", result.FallbackDetail)
+			}
+		}
 	}
-	if len(tags) > 0 {
-		baseCfg.BuildFlags[0] += " " + tags
-	}
-	escaped := make([]string, len(patterns))
-	for i := range patterns {
-		escaped[i] = "pattern=" + patterns[i]
-	}
-	baseLoadStart := time.Now()
-	pkgs, err := packages.Load(baseCfg, escaped...)
-	logTiming(ctx, "load.packages.base.load", baseLoadStart)
-	logLoadDebug(ctx, "base", baseCfg.Mode, strings.Join(patterns, ","), wd, pkgs, nil)
+	logLoadDebug(ctx, "typed", packages.LoadAllSyntax, strings.Join(patterns, ","), wd, typedPkgs, parseStats)
 	if err != nil {
-		return nil, nil, []error{err}
+		return nil, []error{err}
 	}
-	baseErrsStart := time.Now()
-	errs := collectLoadErrors(pkgs)
-	logTiming(ctx, "load.packages.base.collect_errors", baseErrsStart)
+	errs := collectLoadErrors(typedPkgs)
+	logTiming(ctx, "load.packages.collect_errors", loadStart)
 	if len(errs) > 0 {
-		return nil, nil, errs
+		return nil, errs
 	}
-	var fingerprints *incrementalFingerprintSnapshot
-	if !incrementalColdBootstrapEnabled(ctx) {
-		fingerprints = analyzeIncrementalFingerprints(ctx, wd, env, tags, pkgs)
-		analyzeIncrementalGraph(ctx, wd, env, tags, pkgs, fingerprints)
-	}
-
-	baseFiles := collectPackageFiles(pkgs)
-	loader := &lazyLoader{
-		ctx:          ctx,
-		wd:           wd,
-		env:          env,
-		tags:         tags,
-		fset:         fset,
-		baseFiles:    baseFiles,
-		session:      session,
-		fingerprints: fingerprints,
-	}
-	return pkgs, loader, nil
-}
-
-func baseLoadMode(ctx context.Context) packages.LoadMode {
-	mode := packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports
-	if !incrementalColdBootstrapEnabled(ctx) {
-		mode |= packages.NeedDeps
-	}
-	return mode
+	return typedPkgs, nil
 }
 
 func collectLoadErrors(pkgs []*packages.Package) []error {
@@ -481,8 +455,6 @@ type objectCache struct {
 	packages map[string]*packages.Package
 	objects  map[objRef]objCacheEntry
 	hasher   typeutil.Hasher
-	loader   *lazyLoader
-	summary  *summaryProviderResolver
 }
 
 type objRef struct {
@@ -495,11 +467,7 @@ type objCacheEntry struct {
 	errs []error
 }
 
-func newObjectCache(pkgs []*packages.Package, loader *lazyLoader) *objectCache {
-	return newObjectCacheWithLoader(pkgs, loader, nil, nil)
-}
-
-func newObjectCacheWithLoader(pkgs []*packages.Package, loader *lazyLoader, _ *localFastPathLoader, summary *summaryProviderResolver) *objectCache {
+func newObjectCache(pkgs []*packages.Package) *objectCache {
 	if len(pkgs) == 0 {
 		panic("object cache must have packages to draw from")
 	}
@@ -508,11 +476,6 @@ func newObjectCacheWithLoader(pkgs []*packages.Package, loader *lazyLoader, _ *l
 		packages: make(map[string]*packages.Package),
 		objects:  make(map[objRef]objCacheEntry),
 		hasher:   typeutil.MakeHasher(),
-		loader:   loader,
-		summary:  summary,
-	}
-	if oc.fset == nil && loader != nil {
-		oc.fset = loader.fset
 	}
 	// Depth-first search of all dependencies to gather import path to
 	// packages.Package mapping. go/packages guarantees that for a single
@@ -546,24 +509,6 @@ func (oc *objectCache) registerPackages(pkgs []*packages.Package, replace bool) 
 	}
 }
 
-func (oc *objectCache) ensurePackage(pkgPath string) (*packages.Package, []error) {
-	if pkg := oc.packages[pkgPath]; pkg != nil && pkg.TypesInfo != nil && len(pkg.Syntax) > 0 {
-		return pkg, nil
-	}
-	if oc.loader == nil {
-		if pkg := oc.packages[pkgPath]; pkg != nil {
-			return pkg, nil
-		}
-		return nil, []error{fmt.Errorf("package %q is missing type information", pkgPath)}
-	}
-	loaded, errs := oc.loader.load(pkgPath)
-	if len(errs) > 0 {
-		return nil, errs
-	}
-	oc.registerPackages(loaded, true)
-	return oc.packages[pkgPath], nil
-}
-
 // get converts a Go object into a Wire structure. It may return a *Provider, an
 // *IfaceBinding, a *ProviderSet, a *Value, or a []*Field.
 func (oc *objectCache) get(obj types.Object) (val interface{}, errs []error) {
@@ -582,14 +527,6 @@ func (oc *objectCache) get(obj types.Object) (val interface{}, errs []error) {
 	}()
 	switch obj := obj.(type) {
 	case *types.Var:
-		if isProviderSetType(obj.Type()) && oc.summary != nil {
-			if pset, ok, summaryErrs := oc.summary.Resolve(obj.Pkg().Path(), obj.Name()); ok {
-				return pset, summaryErrs
-			}
-		}
-		if _, errs := oc.ensurePackage(ref.importPath); len(errs) > 0 {
-			return nil, errs
-		}
 		spec := oc.varDecl(obj)
 		if spec == nil || len(spec.Values) == 0 {
 			return nil, []error{fmt.Errorf("%v is not a provider or a provider set", obj)}
@@ -605,9 +542,6 @@ func (oc *objectCache) get(obj types.Object) (val interface{}, errs []error) {
 	case *types.Func:
 		return processFuncProvider(oc.fset, obj)
 	default:
-		if _, errs := oc.ensurePackage(ref.importPath); len(errs) > 0 {
-			return nil, errs
-		}
 		return nil, []error{fmt.Errorf("%v is not a provider or a provider set", obj)}
 	}
 }

@@ -15,27 +15,19 @@
 package wire
 
 import (
-	"encoding/json"
-	"os"
+	"context"
+
+	"github.com/goforj/wire/internal/loader"
 )
 
-var (
-	osCreateTemp = os.CreateTemp
-	osMkdirAll   = os.MkdirAll
-	osReadFile   = os.ReadFile
-	osRemove     = os.Remove
-	osRemoveAll  = os.RemoveAll
-	osRename     = os.Rename
-	osStat       = os.Stat
-	osTempDir    = os.TempDir
+func loaderValidationMode(ctx context.Context, wd string, env []string) bool {
+	return effectiveLoaderMode(ctx, wd, env) != loader.ModeFallback
+}
 
-	jsonMarshal   = json.Marshal
-	jsonUnmarshal = json.Unmarshal
-
-	cacheKeyForPackageFunc      = cacheKeyForPackage
-	detectOutputDirFunc         = detectOutputDir
-	buildCacheFilesFunc         = buildCacheFiles
-	buildCacheFilesFromMetaFunc = buildCacheFilesFromMeta
-	rootPackageFilesFunc        = rootPackageFiles
-	hashFilesFunc               = hashFiles
-)
+func effectiveLoaderMode(ctx context.Context, wd string, env []string) loader.Mode {
+	mode := loader.ModeFromEnv(env)
+	if mode != loader.ModeAuto {
+		return mode
+	}
+	return loader.ModeAuto
+}

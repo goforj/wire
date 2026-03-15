@@ -35,7 +35,6 @@ import (
 
 type showCmd struct {
 	tags        string
-	incremental optionalBoolFlag
 	profile     profileFlags
 }
 
@@ -63,7 +62,6 @@ func (*showCmd) Usage() string {
 // SetFlags registers flags for the subcommand.
 func (cmd *showCmd) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&cmd.tags, "tags", "", "append build tags to the default wirebuild")
-	addIncrementalFlag(&cmd.incremental, f)
 	cmd.profile.addFlags(f)
 }
 
@@ -77,7 +75,6 @@ func (cmd *showCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interf
 	defer stop()
 	totalStart := time.Now()
 	ctx = withTiming(ctx, cmd.profile.timings)
-	ctx = cmd.incremental.apply(ctx)
 
 	wd, err := os.Getwd()
 	if err != nil {

@@ -124,7 +124,7 @@ func logLoadDebug(ctx context.Context, scope string, mode packages.LoadMode, sub
 	}
 	if parseStats != nil {
 		snap := parseStats.snapshot()
-		debugf(ctx, "load.debug scope=%s parse.calls=%d parse.primary=%d parse.deps=%d parse.cache_hits=%d parse.cache_misses=%d parse.errors=%d parse.total=%s",
+		debugf(ctx, "load.debug scope=%s parse.calls=%d parse.primary=%d parse.deps=%d parse.cache_hits=%d parse.cache_misses=%d parse.errors=%d parse.cumulative=%s",
 			scope,
 			snap.calls,
 			snap.primaryCalls,
@@ -190,6 +190,23 @@ func summarizeLoadScope(wd string, pkgs []*packages.Package) loadScopeStats {
 	return stats
 }
 
+func collectAllPackages(pkgs []*packages.Package) map[string]*packages.Package {
+	all := make(map[string]*packages.Package)
+	stack := append([]*packages.Package(nil), pkgs...)
+	for len(stack) > 0 {
+		p := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if p == nil || all[p.PkgPath] != nil {
+			continue
+		}
+		all[p.PkgPath] = p
+		for _, imp := range p.Imports {
+			stack = append(stack, imp)
+		}
+	}
+	return all
+}
+
 func classifyPackageLocation(moduleRoot string, pkg *packages.Package) string {
 	if moduleRoot == "" || pkg == nil {
 		return "unknown"
@@ -210,8 +227,8 @@ func classifyPackageLocation(moduleRoot string, pkg *packages.Package) string {
 }
 
 func isWithinRoot(root, name string) bool {
-	cleanRoot := filepath.Clean(root)
-	cleanName := filepath.Clean(name)
+	cleanRoot := canonicalPath(root)
+	cleanName := canonicalPath(name)
 	if cleanName == cleanRoot {
 		return true
 	}
@@ -220,6 +237,14 @@ func isWithinRoot(root, name string) bool {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+func canonicalPath(path string) string {
+	clean := filepath.Clean(path)
+	if resolved, err := filepath.EvalSymlinks(clean); err == nil && resolved != "" {
+		return filepath.Clean(resolved)
+	}
+	return clean
 }
 
 func topPackageMetrics(metrics []packageMetric) []string {

@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"go/ast"
+	"go/format"
 	"go/printer"
 	"go/token"
 	"go/types"
@@ -101,73 +102,67 @@ func Generate(ctx context.Context, wd string, env []string, patterns []string, o
 	if opts == nil {
 		opts = &GenerateOptions{}
 	}
-	var preloadState *incrementalPreloadState
-	bypassIncrementalManifest := false
-	coldBootstrap := false
-	if IncrementalEnabled(ctx, env) {
-		debugf(ctx, "incremental=enabled")
-		preloadState, _ = prepareIncrementalPreloadState(ctx, wd, env, patterns, opts)
-		coldBootstrap = preloadState == nil
-		if coldBootstrap {
-			ctx = withIncrementalColdBootstrap(ctx, true)
-		}
-		if cached, ok := readPreloadIncrementalManifestResultsFromState(ctx, wd, env, patterns, opts, preloadState, preloadState != nil); ok {
-			return cached, nil
-		}
-		if generated, ok, bypass, errs := tryIncrementalLocalFastPath(ctx, wd, env, patterns, opts, preloadState); ok || len(errs) > 0 {
-			return generated, errs
-		} else if bypass {
-			bypassIncrementalManifest = true
-		}
-	}
-	if cached, ok := readManifestResults(wd, env, patterns, opts); ok {
-		return cached, nil
-	}
 	loadStart := time.Now()
-	pkgs, loader, errs := load(ctx, wd, env, opts.Tags, patterns)
+	pkgs, errs := load(ctx, wd, env, opts.Tags, patterns)
 	logTiming(ctx, "generate.load", loadStart)
 	if len(errs) > 0 {
 		return nil, errs
 	}
-	if err := validateIncrementalTouchedPackages(ctx, wd, opts, preloadState, loader.fingerprints); err != nil {
-		if shouldBypassIncrementalManifestAfterFastPathError(err) {
-			return nil, []error{err}
-		}
-		bypassIncrementalManifest = true
-	}
-	if !bypassIncrementalManifest {
-		if cached, ok := readIncrementalManifestResults(ctx, wd, env, patterns, opts, pkgs, loader.fingerprints); ok {
-			warmPackageOutputCache(pkgs, opts, cached)
-			return cached, nil
-		}
-	} else {
-		debugf(ctx, "incremental.manifest bypass reason=fastpath_error")
-		ctx = withBypassPackageCache(ctx)
-	}
 	generated := make([]GenerateResult, len(pkgs))
 	for i, pkg := range pkgs {
-		generated[i] = generateForPackage(ctx, pkg, loader, opts)
-	}
-	if allGeneratedOK(generated) {
-		if IncrementalEnabled(ctx, env) {
-			if coldBootstrap {
-				snapshot := buildIncrementalManifestSnapshotFromPackages(wd, opts.Tags, incrementalManifestPackages(pkgs, loader))
-				writeIncrementalManifestWithOptions(wd, env, patterns, opts, incrementalManifestPackages(pkgs, loader), snapshot, generated, false)
-				if snapshot != nil {
-					writeLocalPackageExports(wd, opts.Tags, incrementalManifestPackages(pkgs, loader), snapshot.fingerprints)
-					writeIncrementalGraphFromSnapshot(wd, opts.Tags, manifestOutputPkgPathsFromGenerated(generated), snapshot.fingerprints)
-					loader.fingerprints = snapshot
-				}
-				writeIncrementalPackageSummaries(loader, pkgs)
-			} else {
-				writeLocalPackageExports(wd, opts.Tags, incrementalManifestPackages(pkgs, loader), loader.fingerprints.fingerprints)
-				writeIncrementalPackageSummaries(loader, pkgs)
-				writeIncrementalManifest(wd, env, patterns, opts, incrementalManifestPackages(pkgs, loader), loader.fingerprints, generated)
-			}
+		pkgStart := time.Now()
+		generated[i].PkgPath = pkg.PkgPath
+		dirStart := time.Now()
+		outDir, err := detectOutputDir(pkg.GoFiles)
+		logTiming(ctx, "generate.package."+pkg.PkgPath+".output_dir", dirStart)
+		if err != nil {
+			generated[i].Errs = append(generated[i].Errs, err)
+			continue
 		}
-		writeManifest(wd, env, patterns, opts, pkgs)
+		generated[i].OutputPath = filepath.Join(outDir, opts.PrefixOutputFile+"wire_gen.go")
+		g := newGen(pkg)
+		oc := newObjectCache([]*packages.Package{pkg})
+		injectorStart := time.Now()
+		injectorFiles, genErrs := generateInjectors(oc, g, pkg)
+		logTiming(ctx, "generate.package."+pkg.PkgPath+".injectors", injectorStart)
+		if len(genErrs) > 0 {
+			generated[i].Errs = genErrs
+			continue
+		}
+		copyStart := time.Now()
+		copyNonInjectorDecls(g, injectorFiles, pkg.TypesInfo)
+		logTiming(ctx, "generate.package."+pkg.PkgPath+".copy_non_injectors", copyStart)
+		frameStart := time.Now()
+		goSrc := g.frame(opts.Tags)
+		logTiming(ctx, "generate.package."+pkg.PkgPath+".frame", frameStart)
+		if len(opts.Header) > 0 {
+			goSrc = append(opts.Header, goSrc...)
+		}
+		formatStart := time.Now()
+		fmtSrc, err := format.Source(goSrc)
+		logTiming(ctx, "generate.package."+pkg.PkgPath+".format", formatStart)
+		if err != nil {
+			generated[i].Errs = append(generated[i].Errs, err)
+		} else {
+			goSrc = fmtSrc
+		}
+		generated[i].Content = goSrc
+		logTiming(ctx, "generate.package."+pkg.PkgPath+".total", pkgStart)
 	}
 	return generated, nil
+}
+
+func detectOutputDir(paths []string) (string, error) {
+	if len(paths) == 0 {
+		return "", fmt.Errorf("no files to derive output directory from")
+	}
+	dir := filepath.Dir(paths[0])
+	for _, p := range paths[1:] {
+		if dir2 := filepath.Dir(p); dir2 != dir {
+			return "", fmt.Errorf("found conflicting directories %q and %q", dir, dir2)
+		}
+	}
+	return dir, nil
 }
 
 func manifestOutputPkgPathsFromGenerated(generated []GenerateResult) []string {
@@ -187,46 +182,6 @@ func manifestOutputPkgPathsFromGenerated(generated []GenerateResult) []string {
 		out = append(out, gen.PkgPath)
 	}
 	sort.Strings(out)
-	return out
-}
-
-func warmPackageOutputCache(pkgs []*packages.Package, opts *GenerateOptions, generated []GenerateResult) {
-	if len(pkgs) == 0 || len(generated) == 0 {
-		return
-	}
-	byPkg := make(map[string][]byte, len(generated))
-	for _, gen := range generated {
-		if len(gen.Content) == 0 {
-			continue
-		}
-		byPkg[gen.PkgPath] = gen.Content
-	}
-	for _, pkg := range pkgs {
-		content := byPkg[pkg.PkgPath]
-		if len(content) == 0 {
-			continue
-		}
-		key, err := cacheKeyForPackage(pkg, opts)
-		if err != nil || key == "" {
-			continue
-		}
-		writeCache(key, content)
-	}
-}
-
-func incrementalManifestPackages(pkgs []*packages.Package, loader *lazyLoader) []*packages.Package {
-	if loader == nil || len(loader.loaded) == 0 {
-		return pkgs
-	}
-	out := make([]*packages.Package, 0, len(loader.loaded))
-	for _, pkg := range loader.loaded {
-		if pkg != nil {
-			out = append(out, pkg)
-		}
-	}
-	if len(out) == 0 {
-		return pkgs
-	}
 	return out
 }
 
