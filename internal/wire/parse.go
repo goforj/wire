@@ -574,6 +574,11 @@ func (oc *objectCache) semanticProviderSet(obj *types.Var) (*ProviderSet, bool, 
 	if !ok {
 		return nil, false, nil
 	}
+	for _, item := range setArt.Items {
+		if item.Kind == "bind" {
+			return nil, false, nil
+		}
+	}
 	pset := &ProviderSet{
 		Pos:     obj.Pos(),
 		PkgPath: obj.Pkg().Path(),
@@ -1856,5 +1861,11 @@ func bindShouldUsePointer(info *types.Info, call *ast.CallExpr) bool {
 	fun := call.Fun.(*ast.SelectorExpr)                 // wire.Bind
 	pkgName := fun.X.(*ast.Ident)                       // wire
 	wireName := info.ObjectOf(pkgName).(*types.PkgName) // wire package
-	return wireName.Imported().Scope().Lookup("bindToUsePointer") != nil
+	if imported := wireName.Imported(); imported != nil {
+		if isWireImport(imported.Path()) {
+			return true
+		}
+		return imported.Scope().Lookup("bindToUsePointer") != nil
+	}
+	return false
 }

@@ -367,7 +367,7 @@ func TestObjectCacheSemanticProviderSetFallback(t *testing.T) {
 	}
 }
 
-func TestObjectCacheSemanticProviderSetFallbackTypeOnlyForms(t *testing.T) {
+func TestObjectCacheSemanticProviderSetSkipsBindArtifacts(t *testing.T) {
 	t.Parallel()
 
 	fset := token.NewFileSet()
@@ -429,22 +429,15 @@ func TestObjectCacheSemanticProviderSetFallbackTypeOnlyForms(t *testing.T) {
 		},
 		hasher: typeutil.MakeHasher(),
 	}
-	item, errs := oc.get(setVar)
+	pset, ok, errs := oc.semanticProviderSet(setVar)
 	if len(errs) > 0 {
-		t.Fatalf("oc.get(Set) errs = %v", errs)
+		t.Fatalf("semanticProviderSet(Set) errs = %v", errs)
 	}
-	pset, ok := item.(*ProviderSet)
-	if !ok || pset == nil {
-		t.Fatalf("oc.get(Set) type = %T, want *ProviderSet", item)
+	if ok {
+		t.Fatalf("semanticProviderSet(Set) ok = true, want false")
 	}
-	if len(pset.Bindings) != 1 {
-		t.Fatalf("bindings len = %d, want 1", len(pset.Bindings))
-	}
-	if len(pset.Providers) != 1 || !pset.Providers[0].IsStruct {
-		t.Fatalf("providers = %+v, want one struct provider", pset.Providers)
-	}
-	if len(pset.Fields) != 1 || pset.Fields[0].Name != "Message" {
-		t.Fatalf("fields = %+v, want Message field", pset.Fields)
+	if pset != nil {
+		t.Fatalf("semanticProviderSet(Set) = %#v, want nil", pset)
 	}
 }
 
