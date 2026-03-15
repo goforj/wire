@@ -16,6 +16,7 @@ import (
 
 const (
 	importBenchEnv        = "WIRE_IMPORT_BENCH_TABLE"
+	importBenchBreakdown  = "WIRE_IMPORT_BENCH_BREAKDOWN"
 	stockWireCommit       = "9c25c9016f6825302537c4efdd5e897976f9c826"
 	stockWireModulePath   = "github.com/google/wire"
 	currentWireModulePath = "github.com/goforj/wire"
@@ -55,6 +56,57 @@ func TestPrintImportScaleBenchmarkTable(t *testing.T) {
 		})
 	}
 	printImportBenchTable(t, rows)
+}
+
+func TestPrintImportScaleBenchmarkBreakdown(t *testing.T) {
+	if os.Getenv(importBenchBreakdown) != "1" {
+		t.Skipf("%s not set", importBenchBreakdown)
+	}
+	repoRoot, err := importBenchRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentBin := buildWireBinary(t, repoRoot, "current-wire")
+	stockDir := extractStockWire(t, repoRoot, stockWireCommit)
+	stockBin := buildWireBinary(t, stockDir, "stock-wire")
+
+	const imports = 1000
+	stockFixture := createImportBenchFixture(t, imports, stockWireModulePath, stockDir)
+	currentFixture := createImportBenchFixture(t, imports, currentWireModulePath, repoRoot)
+
+	stockCold := medianDuration(runColdTrials(t, stockBin, stockFixture, importBenchTrials))
+	currentCold := medianDuration(runColdTrials(t, currentBin, currentFixture, importBenchTrials))
+	currentWarm := medianDuration(runWarmTrials(t, currentBin, currentFixture, importBenchTrials))
+
+	fmt.Printf("repo size: %d\n", imports)
+	fmt.Printf("stock cold: %s\n", formatMs(stockCold))
+	fmt.Printf("current cold: %s\n", formatMs(currentCold))
+	fmt.Printf("current unchanged: %s\n", formatMs(currentWarm))
+	fmt.Printf("cold speedup: %s\n", formatSpeedup(stockCold, currentCold))
+	fmt.Printf("unchanged speedup: %s\n", formatSpeedup(stockCold, currentWarm))
+	fmt.Printf("cold gap: %s\n", formatMs(currentCold-stockCold))
+
+	home := t.TempDir()
+	goCache := filepath.Join(t.TempDir(), "gocache")
+	_, output := runWireBenchCommandOutput(t, currentBin, currentFixture, home, goCache, "-timings")
+	fmt.Println("current cold timings:")
+	for _, line := range strings.Split(output, "\n") {
+		if !strings.Contains(line, "wire: timing:") {
+			continue
+		}
+		if strings.Contains(line, "loader.custom.root.discovery=") ||
+			strings.Contains(line, "loader.discovery.") ||
+			strings.Contains(line, "load.packages.load=") ||
+			strings.Contains(line, "loader.custom.typed.artifact_write=") ||
+			strings.Contains(line, "loader.custom.typed.root_load.wall=") ||
+			strings.Contains(line, "loader.custom.typed.discovery.wall=") ||
+			strings.Contains(line, "loader.custom.typed.artifact_writes=") ||
+			strings.Contains(line, "generate.package.") ||
+			strings.Contains(line, "wire.Generate=") ||
+			strings.Contains(line, "total=") {
+			fmt.Println(line)
+		}
+	}
 }
 
 func buildWireBinary(t *testing.T, dir, name string) string {
@@ -147,7 +199,15 @@ func createImportBenchFixture(t *testing.T, imports int, wireModulePath, wireRep
 
 func runWireBenchCommand(t *testing.T, bin, pkgDir, home, goCache string) time.Duration {
 	t.Helper()
-	cmd := exec.Command(bin, "gen")
+	d, _ := runWireBenchCommandOutput(t, bin, pkgDir, home, goCache)
+	return d
+}
+
+func runWireBenchCommandOutput(t *testing.T, bin, pkgDir, home, goCache string, extraArgs ...string) (time.Duration, string) {
+	t.Helper()
+	args := []string{"gen"}
+	args = append(args, extraArgs...)
+	cmd := exec.Command(bin, args...)
 	cmd.Dir = pkgDir
 	cmd.Env = append(benchEnv(home, goCache), "WIRE_LOADER_ARTIFACTS=1")
 	var stderr bytes.Buffer
@@ -157,7 +217,7 @@ func runWireBenchCommand(t *testing.T, bin, pkgDir, home, goCache string) time.D
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("run %s in %s: %v\n%s", bin, pkgDir, err, stderr.String())
 	}
-	return time.Since(start)
+	return time.Since(start), stderr.String()
 }
 
 func runColdTrials(t *testing.T, bin, pkgDir string, trials int) []time.Duration {

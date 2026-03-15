@@ -49,6 +49,7 @@ func main() {
 	subcommands.Register(subcommands.CommandsCommand(), "")
 	subcommands.Register(subcommands.FlagsCommand(), "")
 	subcommands.Register(subcommands.HelpCommand(), "")
+	subcommands.Register(&cacheCmd{}, "")
 	subcommands.Register(&checkCmd{}, "")
 	subcommands.Register(&diffCmd{}, "")
 	subcommands.Register(&genCmd{}, "")
@@ -69,6 +70,7 @@ func main() {
 		"commands": true, // builtin
 		"help":     true, // builtin
 		"flags":    true, // builtin
+		"cache":    true,
 		"check":    true,
 		"diff":     true,
 		"gen":      true,
