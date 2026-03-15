@@ -184,6 +184,7 @@ func loadRootGraphCustom(ctx context.Context, req RootLoadRequest) (*RootLoadRes
 			PkgPath:         m.ImportPath,
 			GoFiles:         append([]string(nil), metaFiles(m)...),
 			CompiledGoFiles: append([]string(nil), metaFiles(m)...),
+			ExportFile:      m.Export,
 			Imports:         make(map[string]*packages.Package),
 		}
 		if m.Error != nil && strings.TrimSpace(m.Error.Err) != "" {
