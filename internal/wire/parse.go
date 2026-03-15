@@ -33,6 +33,7 @@ import (
 	"golang.org/x/tools/go/types/typeutil"
 
 	"github.com/goforj/wire/internal/loader"
+	"github.com/goforj/wire/internal/semanticcache"
 )
 
 // A providerSetSrc captures the source for a type provided by a ProviderSet.
@@ -267,7 +268,7 @@ func Load(ctx context.Context, wd string, env []string, tags string, patterns []
 		Fset: fset,
 		Sets: make(map[ProviderSetID]*ProviderSet),
 	}
-	oc := newObjectCache(pkgs)
+	oc := newObjectCacheWithEnv(pkgs, env)
 	ec := new(errorCollector)
 	for _, pkg := range pkgs {
 		if isWireImport(pkg.PkgPath) {
@@ -452,8 +453,10 @@ func (in *Injector) String() string {
 // objectCache is a lazily evaluated mapping of objects to Wire structures.
 type objectCache struct {
 	fset     *token.FileSet
+	env      []string
 	packages map[string]*packages.Package
 	objects  map[objRef]objCacheEntry
+	semantic map[string]*semanticcache.PackageArtifact
 	hasher   typeutil.Hasher
 }
 
@@ -468,13 +471,19 @@ type objCacheEntry struct {
 }
 
 func newObjectCache(pkgs []*packages.Package) *objectCache {
+	return newObjectCacheWithEnv(pkgs, nil)
+}
+
+func newObjectCacheWithEnv(pkgs []*packages.Package, env []string) *objectCache {
 	if len(pkgs) == 0 {
 		panic("object cache must have packages to draw from")
 	}
 	oc := &objectCache{
 		fset:     pkgs[0].Fset,
+		env:      append([]string(nil), env...),
 		packages: make(map[string]*packages.Package),
 		objects:  make(map[objRef]objCacheEntry),
+		semantic: make(map[string]*semanticcache.PackageArtifact),
 		hasher:   typeutil.MakeHasher(),
 	}
 	// Depth-first search of all dependencies to gather import path to
@@ -482,6 +491,7 @@ func newObjectCache(pkgs []*packages.Package) *objectCache {
 	// call to packages.Load and an import path X, there will exist only
 	// one *packages.Package value with PkgPath X.
 	oc.registerPackages(pkgs, false)
+	oc.recordSemanticArtifacts()
 	return oc
 }
 
@@ -528,6 +538,11 @@ func (oc *objectCache) get(obj types.Object) (val interface{}, errs []error) {
 	switch obj := obj.(type) {
 	case *types.Var:
 		spec := oc.varDecl(obj)
+		if spec == nil && isProviderSetType(obj.Type()) {
+			if pset, ok, errs := oc.semanticProviderSet(obj); ok {
+				return pset, errs
+			}
+		}
 		if spec == nil || len(spec.Values) == 0 {
 			return nil, []error{fmt.Errorf("%v is not a provider or a provider set", obj)}
 		}
@@ -544,6 +559,552 @@ func (oc *objectCache) get(obj types.Object) (val interface{}, errs []error) {
 	default:
 		return nil, []error{fmt.Errorf("%v is not a provider or a provider set", obj)}
 	}
+}
+
+func (oc *objectCache) semanticProviderSet(obj *types.Var) (*ProviderSet, bool, []error) {
+	pkg := oc.packages[obj.Pkg().Path()]
+	if pkg == nil {
+		return nil, false, nil
+	}
+	art := oc.semanticArtifact(pkg)
+	if art == nil || !art.Supported {
+		return nil, false, nil
+	}
+	setArt, ok := art.Vars[obj.Name()]
+	if !ok {
+		return nil, false, nil
+	}
+	pset := &ProviderSet{
+		Pos:     obj.Pos(),
+		PkgPath: obj.Pkg().Path(),
+		VarName: obj.Name(),
+	}
+	ec := new(errorCollector)
+	for _, item := range setArt.Items {
+		switch item.Kind {
+		case "func":
+			providerObj, errs := oc.semanticProvider(item.ImportPath, item.Name)
+			if len(errs) > 0 {
+				ec.add(errs...)
+				continue
+			}
+			pset.Providers = append(pset.Providers, providerObj)
+		case "set":
+			setObj, errs := oc.semanticImportedSet(item.ImportPath, item.Name)
+			if len(errs) > 0 {
+				ec.add(errs...)
+				continue
+			}
+			pset.Imports = append(pset.Imports, setObj)
+		case "bind":
+			binding, errs := oc.semanticBinding(item)
+			if len(errs) > 0 {
+				ec.add(errs...)
+				continue
+			}
+			pset.Bindings = append(pset.Bindings, binding)
+		case "struct":
+			providerObj, errs := oc.semanticStructProvider(item)
+			if len(errs) > 0 {
+				ec.add(errs...)
+				continue
+			}
+			pset.Providers = append(pset.Providers, providerObj)
+		case "fields":
+			fields, errs := oc.semanticFields(item)
+			if len(errs) > 0 {
+				ec.add(errs...)
+				continue
+			}
+			pset.Fields = append(pset.Fields, fields...)
+		default:
+			ec.add(fmt.Errorf("unsupported semantic cache item kind %q", item.Kind))
+		}
+	}
+	if len(ec.errors) > 0 {
+		return nil, true, ec.errors
+	}
+	var errs []error
+	pset.providerMap, pset.srcMap, errs = buildProviderMap(oc.fset, oc.hasher, pset)
+	if len(errs) > 0 {
+		return nil, true, errs
+	}
+	if errs := verifyAcyclic(pset.providerMap, oc.hasher); len(errs) > 0 {
+		return nil, true, errs
+	}
+	return pset, true, nil
+}
+
+func (oc *objectCache) semanticProvider(importPath, name string) (*Provider, []error) {
+	pkg := oc.packages[importPath]
+	if pkg == nil || pkg.Types == nil {
+		return nil, []error{fmt.Errorf("missing typed package for %s", importPath)}
+	}
+	obj := pkg.Types.Scope().Lookup(name)
+	fn, ok := obj.(*types.Func)
+	if !ok || fn == nil {
+		return nil, []error{fmt.Errorf("%s.%s is not a provider function", importPath, name)}
+	}
+	return processFuncProvider(oc.fset, fn)
+}
+
+func (oc *objectCache) semanticImportedSet(importPath, name string) (*ProviderSet, []error) {
+	pkg := oc.packages[importPath]
+	if pkg == nil || pkg.Types == nil {
+		return nil, []error{fmt.Errorf("missing typed package for %s", importPath)}
+	}
+	obj := pkg.Types.Scope().Lookup(name)
+	v, ok := obj.(*types.Var)
+	if !ok || v == nil || !isProviderSetType(v.Type()) {
+		return nil, []error{fmt.Errorf("%s.%s is not a provider set", importPath, name)}
+	}
+	item, errs := oc.get(v)
+	if len(errs) > 0 {
+		return nil, errs
+	}
+	pset, ok := item.(*ProviderSet)
+	if !ok || pset == nil {
+		return nil, []error{fmt.Errorf("%s.%s did not resolve to a provider set", importPath, name)}
+	}
+	return pset, nil
+}
+
+func (oc *objectCache) semanticBinding(item semanticcache.ProviderSetItemArtifact) (*IfaceBinding, []error) {
+	iface, err := oc.semanticType(item.Type)
+	if err != nil {
+		return nil, []error{err}
+	}
+	provided, err := oc.semanticType(item.Type2)
+	if err != nil {
+		return nil, []error{err}
+	}
+	return &IfaceBinding{
+		Iface:    iface,
+		Provided: provided,
+	}, nil
+}
+
+func (oc *objectCache) semanticStructProvider(item semanticcache.ProviderSetItemArtifact) (*Provider, []error) {
+	typeName, err := oc.semanticTypeName(item.Type)
+	if err != nil {
+		return nil, []error{err}
+	}
+	out := typeName.Type()
+	st, ok := out.Underlying().(*types.Struct)
+	if !ok {
+		return nil, []error{fmt.Errorf("%s.%s does not name a struct", item.Type.ImportPath, item.Type.Name)}
+	}
+	provider := &Provider{
+		Pkg:      typeName.Pkg(),
+		Name:     typeName.Name(),
+		Pos:      typeName.Pos(),
+		IsStruct: true,
+		Out:      []types.Type{out, types.NewPointer(out)},
+	}
+	if item.AllFields {
+		for i := 0; i < st.NumFields(); i++ {
+			if isPrevented(st.Tag(i)) {
+				continue
+			}
+			f := st.Field(i)
+			provider.Args = append(provider.Args, ProviderInput{
+				Type:      f.Type(),
+				FieldName: f.Name(),
+			})
+		}
+	} else {
+		for _, fieldName := range item.FieldNames {
+			f := lookupStructField(st, fieldName)
+			if f == nil {
+				return nil, []error{fmt.Errorf("field %q not found in %s.%s", fieldName, item.Type.ImportPath, item.Type.Name)}
+			}
+			provider.Args = append(provider.Args, ProviderInput{
+				Type:      f.Type(),
+				FieldName: f.Name(),
+			})
+		}
+	}
+	return provider, nil
+}
+
+func (oc *objectCache) semanticFields(item semanticcache.ProviderSetItemArtifact) ([]*Field, []error) {
+	parent, err := oc.semanticType(item.Type)
+	if err != nil {
+		return nil, []error{err}
+	}
+	structType, ptrToField, err := structFromFieldsParent(parent)
+	if err != nil {
+		return nil, []error{err}
+	}
+	fields := make([]*Field, 0, len(item.FieldNames))
+	for _, fieldName := range item.FieldNames {
+		v := lookupStructField(structType, fieldName)
+		if v == nil {
+			return nil, []error{fmt.Errorf("field %q not found", fieldName)}
+		}
+		out := []types.Type{v.Type()}
+		if ptrToField {
+			out = append(out, types.NewPointer(v.Type()))
+		}
+		fields = append(fields, &Field{
+			Parent: parent,
+			Name:   v.Name(),
+			Pkg:    v.Pkg(),
+			Pos:    v.Pos(),
+			Out:    out,
+		})
+	}
+	return fields, nil
+}
+
+func (oc *objectCache) semanticType(ref semanticcache.TypeRef) (types.Type, error) {
+	typeName, err := oc.semanticTypeName(ref)
+	if err != nil {
+		return nil, err
+	}
+	var typ types.Type = typeName.Type()
+	for i := 0; i < ref.Pointer; i++ {
+		typ = types.NewPointer(typ)
+	}
+	return typ, nil
+}
+
+func (oc *objectCache) semanticTypeName(ref semanticcache.TypeRef) (*types.TypeName, error) {
+	pkg := oc.packages[ref.ImportPath]
+	if pkg == nil || pkg.Types == nil {
+		return nil, fmt.Errorf("missing typed package for %s", ref.ImportPath)
+	}
+	obj := pkg.Types.Scope().Lookup(ref.Name)
+	typeName, ok := obj.(*types.TypeName)
+	if !ok || typeName == nil {
+		return nil, fmt.Errorf("%s.%s is not a named type", ref.ImportPath, ref.Name)
+	}
+	return typeName, nil
+}
+
+func structFromFieldsParent(parent types.Type) (*types.Struct, bool, error) {
+	ptr, ok := parent.(*types.Pointer)
+	if !ok {
+		return nil, false, fmt.Errorf("parent type %s is not a pointer", types.TypeString(parent, nil))
+	}
+	switch t := ptr.Elem().Underlying().(type) {
+	case *types.Pointer:
+		st, ok := t.Elem().Underlying().(*types.Struct)
+		if !ok {
+			return nil, false, fmt.Errorf("parent type %s does not point to a struct", types.TypeString(parent, nil))
+		}
+		return st, true, nil
+	case *types.Struct:
+		return t, false, nil
+	default:
+		return nil, false, fmt.Errorf("parent type %s does not point to a struct", types.TypeString(parent, nil))
+	}
+}
+
+func lookupStructField(st *types.Struct, name string) *types.Var {
+	for i := 0; i < st.NumFields(); i++ {
+		if st.Field(i).Name() == name {
+			return st.Field(i)
+		}
+	}
+	return nil
+}
+
+func (oc *objectCache) semanticArtifact(pkg *packages.Package) *semanticcache.PackageArtifact {
+	if pkg == nil {
+		return nil
+	}
+	if art, ok := oc.semantic[pkg.PkgPath]; ok {
+		return art
+	}
+	if len(oc.env) == 0 || len(pkg.GoFiles) == 0 {
+		return nil
+	}
+	art, err := semanticcache.Read(oc.env, pkg.PkgPath, pkg.Name, pkg.GoFiles)
+	if err != nil {
+		return nil
+	}
+	oc.semantic[pkg.PkgPath] = art
+	return art
+}
+
+func (oc *objectCache) recordSemanticArtifacts() {
+	if len(oc.env) == 0 {
+		return
+	}
+	for _, pkg := range oc.packages {
+		if pkg == nil || len(pkg.Syntax) == 0 || pkg.Types == nil || pkg.TypesInfo == nil || len(pkg.GoFiles) == 0 {
+			continue
+		}
+		art := buildSemanticArtifact(pkg)
+		if art == nil {
+			continue
+		}
+		oc.semantic[pkg.PkgPath] = art
+		_ = semanticcache.Write(oc.env, pkg.PkgPath, pkg.Name, pkg.GoFiles, art)
+	}
+}
+
+func buildSemanticArtifact(pkg *packages.Package) *semanticcache.PackageArtifact {
+	if pkg == nil || pkg.Types == nil || pkg.TypesInfo == nil {
+		return nil
+	}
+	art := &semanticcache.PackageArtifact{
+		Version:     1,
+		PackagePath: pkg.PkgPath,
+		PackageName: pkg.Name,
+		Supported:   true,
+		Vars:        make(map[string]semanticcache.ProviderSetArtifact),
+	}
+	scope := pkg.Types.Scope()
+	for _, name := range scope.Names() {
+		obj := scope.Lookup(name)
+		v, ok := obj.(*types.Var)
+		if !ok || !isProviderSetType(v.Type()) {
+			continue
+		}
+		art.HasProviderSetVars = true
+		spec := semanticVarDecl(pkg, v)
+		if spec == nil || len(spec.Values) == 0 {
+			art.Supported = false
+			continue
+		}
+		var idx int
+		found := false
+		for i := range spec.Names {
+			if spec.Names[i].Name == v.Name() {
+				idx = i
+				found = true
+				break
+			}
+		}
+		if !found || idx >= len(spec.Values) {
+			art.Supported = false
+			continue
+		}
+		setArt, ok := summarizeSemanticProviderSet(pkg.TypesInfo, spec.Values[idx], pkg.PkgPath)
+		if !ok {
+			art.Supported = false
+			continue
+		}
+		art.Vars[v.Name()] = setArt
+	}
+	return art
+}
+
+func summarizeSemanticProviderSet(info *types.Info, expr ast.Expr, pkgPath string) (semanticcache.ProviderSetArtifact, bool) {
+	call, ok := astutil.Unparen(expr).(*ast.CallExpr)
+	if !ok {
+		return semanticcache.ProviderSetArtifact{}, false
+	}
+	fnObj := qualifiedIdentObject(info, call.Fun)
+	if fnObj == nil || fnObj.Pkg() == nil || !isWireImport(fnObj.Pkg().Path()) || fnObj.Name() != "NewSet" {
+		return semanticcache.ProviderSetArtifact{}, false
+	}
+	setArt := semanticcache.ProviderSetArtifact{
+		Items: make([]semanticcache.ProviderSetItemArtifact, 0, len(call.Args)),
+	}
+	for _, arg := range call.Args {
+		items, ok := summarizeSemanticProviderSetArg(info, astutil.Unparen(arg), pkgPath)
+		if !ok {
+			return semanticcache.ProviderSetArtifact{}, false
+		}
+		setArt.Items = append(setArt.Items, items...)
+	}
+	return setArt, true
+}
+
+func summarizeSemanticProviderSetArg(info *types.Info, expr ast.Expr, pkgPath string) ([]semanticcache.ProviderSetItemArtifact, bool) {
+	if obj := qualifiedIdentObject(info, expr); obj != nil && obj.Pkg() != nil && obj.Exported() {
+		item := semanticcache.ProviderSetItemArtifact{
+			ImportPath: obj.Pkg().Path(),
+			Name:       obj.Name(),
+		}
+		switch typed := obj.(type) {
+		case *types.Func:
+			item.Kind = "func"
+		case *types.Var:
+			if !isProviderSetType(typed.Type()) {
+				return nil, false
+			}
+			item.Kind = "set"
+		default:
+			return nil, false
+		}
+		if item.ImportPath == "" {
+			item.ImportPath = pkgPath
+		}
+		return []semanticcache.ProviderSetItemArtifact{item}, true
+	}
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return nil, false
+	}
+	fnObj := qualifiedIdentObject(info, call.Fun)
+	if fnObj == nil || fnObj.Pkg() == nil || !isWireImport(fnObj.Pkg().Path()) {
+		return nil, false
+	}
+	switch fnObj.Name() {
+	case "NewSet":
+		nested, ok := summarizeSemanticProviderSet(info, call, pkgPath)
+		if !ok {
+			return nil, false
+		}
+		return nested.Items, true
+	case "Bind":
+		item, ok := summarizeSemanticBind(info, call)
+		if !ok {
+			return nil, false
+		}
+		return []semanticcache.ProviderSetItemArtifact{item}, true
+	case "Struct":
+		item, ok := summarizeSemanticStruct(info, call)
+		if !ok {
+			return nil, false
+		}
+		return []semanticcache.ProviderSetItemArtifact{item}, true
+	case "FieldsOf":
+		item, ok := summarizeSemanticFields(info, call)
+		if !ok {
+			return nil, false
+		}
+		return []semanticcache.ProviderSetItemArtifact{item}, true
+	default:
+		return nil, false
+	}
+}
+
+func summarizeSemanticBind(info *types.Info, call *ast.CallExpr) (semanticcache.ProviderSetItemArtifact, bool) {
+	if len(call.Args) != 2 {
+		return semanticcache.ProviderSetItemArtifact{}, false
+	}
+	iface, ok := summarizeTypeRef(info.TypeOf(call.Args[0]))
+	if !ok || iface.Pointer == 0 {
+		return semanticcache.ProviderSetItemArtifact{}, false
+	}
+	iface.Pointer--
+	providedType := info.TypeOf(call.Args[1])
+	if bindShouldUsePointer(info, call) {
+		ptr, ok := providedType.(*types.Pointer)
+		if !ok {
+			return semanticcache.ProviderSetItemArtifact{}, false
+		}
+		providedType = ptr.Elem()
+	}
+	provided, ok := summarizeTypeRef(providedType)
+	if !ok {
+		return semanticcache.ProviderSetItemArtifact{}, false
+	}
+	return semanticcache.ProviderSetItemArtifact{
+		Kind:  "bind",
+		Type:  iface,
+		Type2: provided,
+	}, true
+}
+
+func summarizeSemanticStruct(info *types.Info, call *ast.CallExpr) (semanticcache.ProviderSetItemArtifact, bool) {
+	if len(call.Args) < 1 {
+		return semanticcache.ProviderSetItemArtifact{}, false
+	}
+	structType := info.TypeOf(call.Args[0])
+	ptr, ok := structType.(*types.Pointer)
+	if !ok {
+		return semanticcache.ProviderSetItemArtifact{}, false
+	}
+	ref, ok := summarizeTypeRef(ptr.Elem())
+	if !ok {
+		return semanticcache.ProviderSetItemArtifact{}, false
+	}
+	item := semanticcache.ProviderSetItemArtifact{
+		Kind: "struct",
+		Type: ref,
+	}
+	if allFields(call) {
+		item.AllFields = true
+		return item, true
+	}
+	item.FieldNames = make([]string, 0, len(call.Args)-1)
+	for i := 1; i < len(call.Args); i++ {
+		lit, ok := call.Args[i].(*ast.BasicLit)
+		if !ok {
+			return semanticcache.ProviderSetItemArtifact{}, false
+		}
+		fieldName, err := strconv.Unquote(lit.Value)
+		if err != nil {
+			return semanticcache.ProviderSetItemArtifact{}, false
+		}
+		item.FieldNames = append(item.FieldNames, fieldName)
+	}
+	return item, true
+}
+
+func summarizeSemanticFields(info *types.Info, call *ast.CallExpr) (semanticcache.ProviderSetItemArtifact, bool) {
+	if len(call.Args) < 2 {
+		return semanticcache.ProviderSetItemArtifact{}, false
+	}
+	parent, ok := summarizeTypeRef(info.TypeOf(call.Args[0]))
+	if !ok {
+		return semanticcache.ProviderSetItemArtifact{}, false
+	}
+	item := semanticcache.ProviderSetItemArtifact{
+		Kind:       "fields",
+		Type:       parent,
+		FieldNames: make([]string, 0, len(call.Args)-1),
+	}
+	for i := 1; i < len(call.Args); i++ {
+		lit, ok := call.Args[i].(*ast.BasicLit)
+		if !ok {
+			return semanticcache.ProviderSetItemArtifact{}, false
+		}
+		fieldName, err := strconv.Unquote(lit.Value)
+		if err != nil {
+			return semanticcache.ProviderSetItemArtifact{}, false
+		}
+		item.FieldNames = append(item.FieldNames, fieldName)
+	}
+	return item, true
+}
+
+func summarizeTypeRef(typ types.Type) (semanticcache.TypeRef, bool) {
+	ref := semanticcache.TypeRef{}
+	for {
+		ptr, ok := typ.(*types.Pointer)
+		if !ok {
+			break
+		}
+		ref.Pointer++
+		typ = ptr.Elem()
+	}
+	named, ok := typ.(*types.Named)
+	if !ok {
+		return semanticcache.TypeRef{}, false
+	}
+	obj := named.Obj()
+	if obj == nil || obj.Pkg() == nil {
+		return semanticcache.TypeRef{}, false
+	}
+	ref.ImportPath = obj.Pkg().Path()
+	ref.Name = obj.Name()
+	return ref, true
+}
+
+func semanticVarDecl(pkg *packages.Package, obj *types.Var) *ast.ValueSpec {
+	pos := obj.Pos()
+	for _, f := range pkg.Syntax {
+		tokenFile := pkg.Fset.File(f.Pos())
+		if tokenFile == nil {
+			continue
+		}
+		if base := tokenFile.Base(); base <= int(pos) && int(pos) < base+tokenFile.Size() {
+			path, _ := astutil.PathEnclosingInterval(f, pos, pos)
+			for _, node := range path {
+				if spec, ok := node.(*ast.ValueSpec); ok {
+					return spec
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // varDecl finds the declaration that defines the given variable.

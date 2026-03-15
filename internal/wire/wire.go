@@ -121,7 +121,7 @@ func Generate(ctx context.Context, wd string, env []string, patterns []string, o
 		}
 		generated[i].OutputPath = filepath.Join(outDir, opts.PrefixOutputFile+"wire_gen.go")
 		g := newGen(pkg)
-		oc := newObjectCache([]*packages.Package{pkg})
+		oc := newObjectCacheWithEnv([]*packages.Package{pkg}, env)
 		injectorStart := time.Now()
 		injectorFiles, genErrs := generateInjectors(oc, g, pkg)
 		logTiming(ctx, "generate.package."+pkg.PkgPath+".injectors", injectorStart)

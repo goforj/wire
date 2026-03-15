@@ -33,6 +33,8 @@ import (
 
 	"golang.org/x/tools/go/gcexportdata"
 	"golang.org/x/tools/go/packages"
+
+	"github.com/goforj/wire/internal/semanticcache"
 )
 
 type unsupportedError struct {
@@ -525,7 +527,7 @@ func (l *customTypedGraphLoader) loadPackage(path string) (*packages.Package, er
 		}
 		l.packages[path] = pkg
 	}
-	useArtifact := loaderArtifactEnabled(l.env) && !isTarget && !isLocal
+	useArtifact := loaderArtifactEnabled(l.env) && !isTarget && (!isLocal || l.useLocalSemanticArtifact(meta))
 	if useArtifact {
 		if typed, ok := l.readArtifact(path, meta, isLocal); ok {
 			linkStart := time.Now()
@@ -629,10 +631,21 @@ func (l *customTypedGraphLoader) loadPackage(path string) (*packages.Package, er
 	pkg.Types = tpkg
 	pkg.TypesInfo = info
 	pkg.Errors = append(pkg.Errors, typeErrors...)
-	if shouldWriteArtifact(l.env, isTarget, isLocal) && len(pkg.Errors) == 0 {
+	if shouldWriteArtifact(l.env, isTarget) && len(pkg.Errors) == 0 {
 		_ = l.writeArtifact(meta, tpkg, isLocal)
 	}
 	return pkg, nil
+}
+
+func (l *customTypedGraphLoader) useLocalSemanticArtifact(meta *packageMeta) bool {
+	if meta == nil {
+		return false
+	}
+	art, err := semanticcache.Read(l.env, meta.ImportPath, meta.Name, metaFiles(meta))
+	if err != nil || art == nil {
+		return false
+	}
+	return art.Supported
 }
 
 func (l *customTypedGraphLoader) checkFiles(path string, checker *types.Checker, files []*ast.File) (err error) {
@@ -650,15 +663,37 @@ func (l *customTypedGraphLoader) readArtifact(path string, meta *packageMeta, is
 	artifactPath, err := loaderArtifactPath(l.env, meta, isLocal)
 	l.stats.artifactPath += time.Since(pathStart)
 	if err != nil {
+		debugf(l.ctx, "loader.artifact.read_miss pkg=%s local=%t reason=path_error err=%v", path, isLocal, err)
 		l.stats.artifactRead += time.Since(start)
 		l.stats.artifactMisses++
 		return nil, false
+	}
+	if isLocal {
+		preloadStart := time.Now()
+		for _, imp := range meta.Imports {
+			target := imp
+			if mapped := meta.ImportMap[imp]; mapped != "" {
+				target = mapped
+			}
+			dep, err := l.loadPackage(target)
+			if err != nil {
+				debugf(l.ctx, "loader.artifact.read_miss pkg=%s local=%t reason=preload_dep_error dep=%s err=%v", path, isLocal, target, err)
+				l.stats.artifactRead += time.Since(start)
+				l.stats.artifactMisses++
+				return nil, false
+			}
+			if dep != nil && dep.Types != nil {
+				l.typesPkgs[target] = dep.Types
+			}
+		}
+		l.stats.artifactImportLink += time.Since(preloadStart)
 	}
 	var tpkg *types.Package
 	decodeStart := time.Now()
 	tpkg, err = readLoaderArtifact(artifactPath, l.fset, l.typesPkgs, path)
 	l.stats.artifactDecode += time.Since(decodeStart)
 	if err != nil {
+		debugf(l.ctx, "loader.artifact.read_miss pkg=%s local=%t reason=decode_error err=%v", path, isLocal, err)
 		l.stats.artifactRead += time.Since(start)
 		l.stats.artifactMisses++
 		return nil, false
@@ -673,10 +708,12 @@ func (l *customTypedGraphLoader) writeArtifact(meta *packageMeta, pkg *types.Pac
 	start := time.Now()
 	artifactPath, err := loaderArtifactPath(l.env, meta, isLocal)
 	if err != nil {
+		debugf(l.ctx, "loader.artifact.write_skip pkg=%s local=%t reason=path_error err=%v", meta.ImportPath, isLocal, err)
 		l.stats.artifactWrite += time.Since(start)
 		return err
 	}
 	if artifactUpToDate(l.env, artifactPath, meta, isLocal) {
+		debugf(l.ctx, "loader.artifact.write_skip pkg=%s local=%t reason=up_to_date", meta.ImportPath, isLocal)
 		l.stats.artifactWrite += time.Since(start)
 		return nil
 	}
@@ -684,6 +721,9 @@ func (l *customTypedGraphLoader) writeArtifact(meta *packageMeta, pkg *types.Pac
 	l.stats.artifactWrite += time.Since(start)
 	if writeErr == nil {
 		l.stats.artifactWrites++
+		debugf(l.ctx, "loader.artifact.write_ok pkg=%s local=%t path=%s", meta.ImportPath, isLocal, artifactPath)
+	} else {
+		debugf(l.ctx, "loader.artifact.write_fail pkg=%s local=%t err=%v", meta.ImportPath, isLocal, writeErr)
 	}
 	if writeErr != nil {
 		return writeErr
@@ -691,8 +731,8 @@ func (l *customTypedGraphLoader) writeArtifact(meta *packageMeta, pkg *types.Pac
 	return nil
 }
 
-func shouldWriteArtifact(env []string, isTarget, isLocal bool) bool {
-	if !loaderArtifactEnabled(env) || isTarget || isLocal {
+func shouldWriteArtifact(env []string, isTarget bool) bool {
+	if !loaderArtifactEnabled(env) || isTarget {
 		return false
 	}
 	return true
