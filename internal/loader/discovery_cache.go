@@ -60,14 +60,6 @@ func readDiscoveryCache(req goListRequest) (map[string]*packageMeta, bool) {
 	return clonePackageMetaMap(entry.Meta), true
 }
 
-func writeDiscoveryCache(req goListRequest, meta map[string]*packageMeta) {
-	entry, err := buildDiscoveryCacheEntry(req, meta)
-	if err != nil {
-		return
-	}
-	_ = saveDiscoveryCacheEntry(req, entry)
-}
-
 func buildDiscoveryCacheEntry(req goListRequest, meta map[string]*packageMeta) (*discoveryCacheEntry, error) {
 	workspace := detectModuleRoot(req.WD)
 	entry := &discoveryCacheEntry{

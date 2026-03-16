@@ -20,11 +20,7 @@ import (
 	"github.com/goforj/wire/internal/loader"
 )
 
-func loaderValidationMode(ctx context.Context, wd string, env []string) bool {
-	return effectiveLoaderMode(ctx, wd, env) != loader.ModeFallback
-}
-
-func effectiveLoaderMode(ctx context.Context, wd string, env []string) loader.Mode {
+func effectiveLoaderMode(_ context.Context, _ string, env []string) loader.Mode {
 	mode := loader.ModeFromEnv(env)
 	if mode != loader.ModeAuto {
 		return mode

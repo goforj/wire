@@ -170,26 +170,6 @@ func detectOutputDir(paths []string) (string, error) {
 	return dir, nil
 }
 
-func manifestOutputPkgPathsFromGenerated(generated []GenerateResult) []string {
-	if len(generated) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(generated))
-	out := make([]string, 0, len(generated))
-	for _, gen := range generated {
-		if gen.PkgPath == "" {
-			continue
-		}
-		if _, ok := seen[gen.PkgPath]; ok {
-			continue
-		}
-		seen[gen.PkgPath] = struct{}{}
-		out = append(out, gen.PkgPath)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // generateInjectors generates the injectors for a given package.
 func generateInjectors(oc *objectCache, g *gen, pkg *packages.Package) (injectorFiles []*ast.File, _ []error) {
 	injectorFiles = make([]*ast.File, 0, len(pkg.Syntax))
