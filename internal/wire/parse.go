@@ -826,7 +826,7 @@ func (oc *objectCache) semanticArtifact(pkg *packages.Package) *semanticcache.Pa
 	if !ok {
 		return nil
 	}
-	art, err := semanticcache.Read(oc.env, importPath, packageName, files)
+	art, err := readSemanticArtifact(oc.env, importPath, packageName, files)
 	if err != nil {
 		return nil
 	}
@@ -848,7 +848,7 @@ func (oc *objectCache) recordSemanticArtifacts() {
 			continue
 		}
 		oc.semantic[pkg.PkgPath] = art
-		_ = semanticcache.Write(oc.env, importPath, packageName, files, art)
+		_ = writeSemanticArtifact(oc.env, importPath, packageName, files, art)
 	}
 }
 
@@ -857,6 +857,14 @@ func semanticArtifactInputs(env []string, pkg *packages.Package) (importPath, pa
 		return "", "", nil, false
 	}
 	return pkg.PkgPath, pkg.Name, pkg.GoFiles, true
+}
+
+func readSemanticArtifact(env []string, importPath, packageName string, files []string) (*semanticcache.PackageArtifact, error) {
+	return semanticcache.Read(env, importPath, packageName, files)
+}
+
+func writeSemanticArtifact(env []string, importPath, packageName string, files []string, art *semanticcache.PackageArtifact) error {
+	return semanticcache.Write(env, importPath, packageName, files, art)
 }
 
 func buildSemanticArtifact(pkg *packages.Package) *semanticcache.PackageArtifact {
