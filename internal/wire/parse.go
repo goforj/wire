@@ -573,44 +573,8 @@ func (oc *objectCache) semanticProviderSet(obj *types.Var) (*ProviderSet, bool, 
 	}
 	ec := new(errorCollector)
 	for _, item := range setArt.Items {
-		switch item.Kind {
-		case "func":
-			providerObj, errs := oc.semanticProvider(item.ImportPath, item.Name)
-			if len(errs) > 0 {
-				ec.add(errs...)
-				continue
-			}
-			pset.Providers = append(pset.Providers, providerObj)
-		case "set":
-			setObj, errs := oc.semanticImportedSet(item.ImportPath, item.Name)
-			if len(errs) > 0 {
-				ec.add(errs...)
-				continue
-			}
-			pset.Imports = append(pset.Imports, setObj)
-		case "bind":
-			binding, errs := oc.semanticBinding(item)
-			if len(errs) > 0 {
-				ec.add(errs...)
-				continue
-			}
-			pset.Bindings = append(pset.Bindings, binding)
-		case "struct":
-			providerObj, errs := oc.semanticStructProvider(item)
-			if len(errs) > 0 {
-				ec.add(errs...)
-				continue
-			}
-			pset.Providers = append(pset.Providers, providerObj)
-		case "fields":
-			fields, errs := oc.semanticFields(item)
-			if len(errs) > 0 {
-				ec.add(errs...)
-				continue
-			}
-			pset.Fields = append(pset.Fields, fields...)
-		default:
-			ec.add(fmt.Errorf("unsupported semantic cache item kind %q", item.Kind))
+		if errs := oc.applySemanticProviderSetItem(pset, item); len(errs) > 0 {
+			ec.add(errs...)
 		}
 	}
 	if len(ec.errors) > 0 {
@@ -646,6 +610,48 @@ func (oc *objectCache) semanticProviderSetArtifact(obj *types.Var) (semanticcach
 		}
 	}
 	return setArt, true
+}
+
+func (oc *objectCache) applySemanticProviderSetItem(pset *ProviderSet, item semanticcache.ProviderSetItemArtifact) []error {
+	switch item.Kind {
+	case "func":
+		providerObj, errs := oc.semanticProvider(item.ImportPath, item.Name)
+		if len(errs) > 0 {
+			return errs
+		}
+		pset.Providers = append(pset.Providers, providerObj)
+		return nil
+	case "set":
+		setObj, errs := oc.semanticImportedSet(item.ImportPath, item.Name)
+		if len(errs) > 0 {
+			return errs
+		}
+		pset.Imports = append(pset.Imports, setObj)
+		return nil
+	case "bind":
+		binding, errs := oc.semanticBinding(item)
+		if len(errs) > 0 {
+			return errs
+		}
+		pset.Bindings = append(pset.Bindings, binding)
+		return nil
+	case "struct":
+		providerObj, errs := oc.semanticStructProvider(item)
+		if len(errs) > 0 {
+			return errs
+		}
+		pset.Providers = append(pset.Providers, providerObj)
+		return nil
+	case "fields":
+		fields, errs := oc.semanticFields(item)
+		if len(errs) > 0 {
+			return errs
+		}
+		pset.Fields = append(pset.Fields, fields...)
+		return nil
+	default:
+		return []error{fmt.Errorf("unsupported semantic cache item kind %q", item.Kind)}
+	}
 }
 
 func (oc *objectCache) semanticProvider(importPath, name string) (*Provider, []error) {
