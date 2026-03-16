@@ -1118,12 +1118,16 @@ func normalizeErrorPos(pos string) string {
 	if pos == "" || pos == "-" {
 		return pos
 	}
-	parts := strings.Split(pos, ":")
-	if len(parts) < 2 {
+	last := strings.LastIndex(pos, ":")
+	if last == -1 {
 		return shortenComparablePath(normalizePathForCompare(pos))
 	}
-	path := shortenComparablePath(normalizePathForCompare(parts[0]))
-	return strings.Join(append([]string{path}, parts[1:]...), ":")
+	prev := strings.LastIndex(pos[:last], ":")
+	if prev == -1 {
+		return shortenComparablePath(normalizePathForCompare(pos))
+	}
+	path := shortenComparablePath(normalizePathForCompare(pos[:prev]))
+	return path + pos[prev:]
 }
 
 func expandSummaryDiagnostics(msg string) []string {

@@ -1137,10 +1137,17 @@ func benchEnv(home, goCache string) []string {
 	env = append(env,
 		"HOME="+home,
 		"GOCACHE="+goCache,
-		"GOMODCACHE=/tmp/gomodcache",
+		"GOMODCACHE="+benchModCache(),
 		"GOSUMDB=off",
 	)
 	return env
+}
+
+func benchModCache() string {
+	if path := os.Getenv("GOMODCACHE"); path != "" {
+		return path
+	}
+	return filepath.Join(os.TempDir(), "gomodcache")
 }
 
 func importBenchGoMod(wireModulePath, wireReplaceDir string) string {
