@@ -134,6 +134,11 @@ type typedLoadStats struct {
 	artifactWrites     int
 }
 
+type artifactPolicy struct {
+	read  bool
+	write bool
+}
+
 func validateTouchedPackagesCustom(ctx context.Context, req TouchedValidationRequest) (*TouchedValidationResult, error) {
 	if len(req.Touched) == 0 {
 		return &TouchedValidationResult{Backend: ModeCustom}, nil
@@ -461,8 +466,8 @@ func (l *customTypedGraphLoader) loadPackage(path string) (*packages.Package, er
 		pkg = packageStub(l.fset, meta)
 		l.packages[path] = pkg
 	}
-	useArtifact := l.shouldUseArtifact(path, meta, isTarget, isLocal)
-	if useArtifact {
+	artifactPolicy := l.artifactPolicy(meta, isTarget, isLocal)
+	if artifactPolicy.read {
 		if typed, ok := l.readArtifact(path, meta, isLocal); ok {
 			linkStart := time.Now()
 			for _, imp := range meta.Imports {
@@ -559,13 +564,13 @@ func (l *customTypedGraphLoader) loadPackage(path string) (*packages.Package, er
 	pkg.Types = tpkg
 	pkg.TypesInfo = info
 	pkg.Errors = append(pkg.Errors, typeErrors...)
-	if shouldWriteArtifact(l.env, isTarget) && len(pkg.Errors) == 0 {
+	if artifactPolicy.write && len(pkg.Errors) == 0 {
 		_ = l.writeArtifact(meta, tpkg, isLocal)
 	}
 	return pkg, nil
 }
 
-func (l *customTypedGraphLoader) useLocalSemanticArtifact(meta *packageMeta) bool {
+func (l *customTypedGraphLoader) localSemanticArtifactSupported(meta *packageMeta) bool {
 	if meta == nil {
 		return false
 	}
@@ -579,6 +584,19 @@ func (l *customTypedGraphLoader) useLocalSemanticArtifact(meta *packageMeta) boo
 	}
 	l.localSemanticOK[meta.ImportPath] = art.Supported
 	return art.Supported
+}
+
+func (l *customTypedGraphLoader) artifactPolicy(meta *packageMeta, isTarget, isLocal bool) artifactPolicy {
+	if !loaderArtifactEnabled(l.env) || isTarget {
+		return artifactPolicy{}
+	}
+	policy := artifactPolicy{write: true}
+	if !isLocal {
+		policy.read = true
+		return policy
+	}
+	policy.read = l.localSemanticArtifactSupported(meta)
+	return policy
 }
 
 func (l *customTypedGraphLoader) checkFiles(path string, checker *types.Checker, files []*ast.File) (err error) {
@@ -656,16 +674,6 @@ func (l *customTypedGraphLoader) readArtifact(path string, meta *packageMeta, is
 	return tpkg, true
 }
 
-func (l *customTypedGraphLoader) shouldUseArtifact(path string, meta *packageMeta, isTarget, isLocal bool) bool {
-	if !loaderArtifactEnabled(l.env) || isTarget {
-		return false
-	}
-	if !isLocal {
-		return true
-	}
-	return l.useLocalSemanticArtifact(meta)
-}
-
 func (l *customTypedGraphLoader) prefetchArtifacts() {
 	if !loaderArtifactEnabled(l.env) {
 		return
@@ -674,7 +682,7 @@ func (l *customTypedGraphLoader) prefetchArtifacts() {
 	for path, meta := range l.meta {
 		_, isTarget := l.targets[path]
 		isLocal := l.isLocalPackage(path, meta)
-		if l.shouldUseArtifact(path, meta, isTarget, isLocal) {
+		if l.artifactPolicy(meta, isTarget, isLocal).read {
 			candidates = append(candidates, path)
 		}
 	}
@@ -759,13 +767,6 @@ func (l *customTypedGraphLoader) writeArtifact(meta *packageMeta, pkg *types.Pac
 		return writeErr
 	}
 	return nil
-}
-
-func shouldWriteArtifact(env []string, isTarget bool) bool {
-	if !loaderArtifactEnabled(env) || isTarget {
-		return false
-	}
-	return true
 }
 
 func (l *customTypedGraphLoader) isLocalPackage(importPath string, meta *packageMeta) bool {
