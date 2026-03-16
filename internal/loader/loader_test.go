@@ -15,13 +15,16 @@
 package loader
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"go/types"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -805,6 +808,1522 @@ func TestLoadTypedPackageGraphCustomArtifactCacheReplacedModuleSourceChange(t *t
 	compareRootPackagesOnly(t, custom.Packages, fallback.Packages, true)
 }
 
+func TestDiscoveryCacheInvalidatesOnGoModResolutionChange(t *testing.T) {
+	root := t.TempDir()
+	depOneRoot := filepath.Join(root, "dep-one")
+	depTwoRoot := filepath.Join(root, "dep-two")
+	appRoot := filepath.Join(root, "appmod")
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(depOneRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(depOneRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"func New() string { return \"one\" }",
+		"",
+	}, "\n"))
+
+	writeTestFile(t, filepath.Join(depTwoRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(depTwoRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"import \"strings\"",
+		"",
+		"func New() string { return strings.ToUpper(\"two\") }",
+		"",
+	}, "\n"))
+
+	writeTestFile(t, filepath.Join(appRoot, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require example.com/dep v0.0.0",
+		"",
+		"replace example.com/dep => " + depOneRoot,
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "app.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Use() string { return dep.New() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "HOME="+homeDir)
+
+	first := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	if len(first.Packages) != 1 || len(first.Packages[0].Errors) != 0 {
+		t.Fatalf("first custom load returned errors: %+v", first.Packages)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(appRoot, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require example.com/dep v0.0.0",
+		"",
+		"replace example.com/dep => " + depTwoRoot,
+		"",
+	}, "\n"))
+
+	custom := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	fallback := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeFallback)
+	compareRootPackagesOnly(t, custom.Packages, fallback.Packages, true)
+	comparePackageByPath(t, custom.Packages, fallback.Packages, "example.com/dep", false)
+}
+
+func TestLoadTypedPackageGraphCustomCrossWorkspaceReplaceTargetIsolation(t *testing.T) {
+	cacheHome := t.TempDir()
+	artifactDir := t.TempDir()
+	repoOne := filepath.Join(t.TempDir(), "repo-one")
+	repoTwo := filepath.Join(t.TempDir(), "repo-two")
+
+	depOneRoot := filepath.Join(repoOne, "depmod")
+	appOneRoot := filepath.Join(repoOne, "appmod")
+	depTwoRoot := filepath.Join(repoTwo, "depmod")
+	appTwoRoot := filepath.Join(repoTwo, "appmod")
+
+	writeTestFile(t, filepath.Join(depOneRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(depOneRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"func New() string { return \"one\" }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appOneRoot, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require example.com/dep v0.0.0",
+		"",
+		"replace example.com/dep => " + depOneRoot,
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appOneRoot, "app", "app.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Use() string { return dep.New() }",
+		"",
+	}, "\n"))
+
+	writeTestFile(t, filepath.Join(depTwoRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(depTwoRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"import \"strings\"",
+		"",
+		"func New() string { return strings.ToUpper(\"two\") }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appTwoRoot, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require example.com/dep v0.0.0",
+		"",
+		"replace example.com/dep => " + depTwoRoot,
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appTwoRoot, "app", "app.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Use() string { return dep.New() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(),
+		"HOME="+cacheHome,
+		loaderArtifactEnv+"=1",
+		loaderArtifactDirEnv+"="+artifactDir,
+	)
+
+	warm := loadTypedPackageGraphForTest(t, appOneRoot, env, "example.com/app/app", ModeCustom)
+	if len(warm.Packages) != 1 || len(warm.Packages[0].Errors) != 0 {
+		t.Fatalf("repo one warm custom load returned errors: %+v", warm.Packages)
+	}
+
+	custom := loadTypedPackageGraphForTest(t, appTwoRoot, env, "example.com/app/app", ModeCustom)
+	fallback := loadTypedPackageGraphForTest(t, appTwoRoot, env, "example.com/app/app", ModeFallback)
+	compareRootPackagesOnly(t, custom.Packages, fallback.Packages, true)
+	comparePackageByPath(t, custom.Packages, fallback.Packages, "example.com/dep", false)
+}
+
+func TestLoadTypedPackageGraphCustomTransitiveShapeChangeWarmParity(t *testing.T) {
+	root := t.TempDir()
+
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(root, "b", "b.go"), strings.Join([]string{
+		"package b",
+		"",
+		"type T struct{}",
+		"",
+		"func New() *T { return &T{} }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(root, "a", "a.go"), strings.Join([]string{
+		"package a",
+		"",
+		"import \"example.com/app/b\"",
+		"",
+		"func New() *b.T { return b.New() }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/app/a\"",
+		"",
+		"func Init() any { return a.New() }",
+		"",
+	}, "\n"))
+
+	first := loadTypedPackageGraphForTest(t, root, os.Environ(), "example.com/app/app", ModeCustom)
+	if len(first.Packages) != 1 || len(first.Packages[0].Errors) != 0 {
+		t.Fatalf("first custom load returned errors: %+v", first.Packages)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(root, "b", "b.go"), strings.Join([]string{
+		"package b",
+		"",
+		"type T struct{}",
+		"",
+		"type Logger interface { Log(string) }",
+		"",
+		"type NoopLogger struct{}",
+		"",
+		"func (NoopLogger) Log(string) {}",
+		"",
+		"func New(Logger) *T { return &T{} }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(root, "a", "a.go"), strings.Join([]string{
+		"package a",
+		"",
+		"import \"example.com/app/b\"",
+		"",
+		"func New() *b.T {",
+		"\tvar logger b.Logger = b.NoopLogger{}",
+		"\treturn b.New(logger)",
+		"}",
+		"",
+	}, "\n"))
+
+	custom := loadTypedPackageGraphForTest(t, root, os.Environ(), "example.com/app/app", ModeCustom)
+	fallback := loadTypedPackageGraphForTest(t, root, os.Environ(), "example.com/app/app", ModeFallback)
+	comparePackageGraphs(t, custom.Packages, fallback.Packages, true)
+}
+
+func TestLoadTypedPackageGraphCustomReplacePathSwitchInvalidatesCaches(t *testing.T) {
+	root := t.TempDir()
+	depOneRoot := filepath.Join(root, "dep-one")
+	depTwoRoot := filepath.Join(root, "dep-two")
+	appRoot := filepath.Join(root, "appmod")
+	artifactDir := t.TempDir()
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(depOneRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(depOneRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"func New() string { return \"one\" }",
+		"",
+	}, "\n"))
+
+	writeTestFile(t, filepath.Join(depTwoRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(depTwoRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"import \"strings\"",
+		"",
+		"func New() string { return strings.TrimSpace(\" two \") }",
+		"",
+	}, "\n"))
+
+	writeTestFile(t, filepath.Join(appRoot, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require example.com/dep v0.0.0",
+		"",
+		"replace example.com/dep => " + depOneRoot,
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "app.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Use() string { return dep.New() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(),
+		"HOME="+homeDir,
+		loaderArtifactEnv+"=1",
+		loaderArtifactDirEnv+"="+artifactDir,
+	)
+
+	first := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	if len(first.Packages) != 1 || len(first.Packages[0].Errors) != 0 {
+		t.Fatalf("first custom load returned errors: %+v", first.Packages)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(appRoot, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require example.com/dep v0.0.0",
+		"",
+		"replace example.com/dep => " + depTwoRoot,
+		"",
+	}, "\n"))
+
+	custom := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	fallback := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeFallback)
+	compareRootPackagesOnly(t, custom.Packages, fallback.Packages, true)
+	comparePackageByPath(t, custom.Packages, fallback.Packages, "example.com/dep", false)
+}
+
+func TestLoadTypedPackageGraphCustomDiscoveryCacheReplacedSiblingOutsideWorkspace(t *testing.T) {
+	root := t.TempDir()
+	depRoot := filepath.Join(root, "depmod")
+	appRoot := filepath.Join(root, "appmod")
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(depRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"func New() string { return \"ok\" }",
+		"",
+	}, "\n"))
+
+	writeTestFile(t, filepath.Join(appRoot, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require example.com/dep v0.0.0",
+		"",
+		"replace example.com/dep => " + depRoot,
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "app.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Use() string { return dep.New() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "HOME="+homeDir)
+	rootLoad := loadRootGraphForTest(t, appRoot, env, []string{"./app"}, ModeCustom)
+	if rootLoad.Discovery == nil {
+		t.Fatal("expected discovery snapshot from custom root load")
+	}
+
+	first := loadTypedPackageGraphWithDiscoveryForTest(t, appRoot, env, "example.com/app/app", ModeCustom, rootLoad.Discovery)
+	if len(first.Packages) != 1 || len(first.Packages[0].Errors) != 0 {
+		t.Fatalf("first custom load returned errors: %+v", first.Packages)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"type Logger interface { Log(string) }",
+		"",
+		"type NoopLogger struct{}",
+		"",
+		"func (NoopLogger) Log(string) {}",
+		"",
+		"func New(Logger) string { return \"ok\" }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "app.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Use() string {",
+		"\tvar logger dep.Logger = dep.NoopLogger{}",
+		"\treturn dep.New(logger)",
+		"}",
+		"",
+	}, "\n"))
+
+	custom := loadTypedPackageGraphWithDiscoveryForTest(t, appRoot, env, "example.com/app/app", ModeCustom, rootLoad.Discovery)
+	fallback := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeFallback)
+	compareRootPackagesOnly(t, custom.Packages, fallback.Packages, true)
+	comparePackageByPath(t, custom.Packages, fallback.Packages, "example.com/dep", false)
+}
+
+func TestDiscoveryCacheInvalidatesOnGeneratedFileSetChange(t *testing.T) {
+	root := t.TempDir()
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"func New() string { return \"base\" }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/app/dep\"",
+		"",
+		"func Init() string { return dep.New() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "HOME="+homeDir)
+	first := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeCustom)
+	if len(first.Packages) != 1 || len(first.Packages[0].Errors) != 0 {
+		t.Fatalf("first custom load returned errors: %+v", first.Packages)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(root, "dep", "zz_generated.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"func Generated() string { return \"generated\" }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/app/dep\"",
+		"",
+		"func Init() string { return dep.New() + dep.Generated() }",
+		"",
+	}, "\n"))
+
+	custom := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeCustom)
+	fallback := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeFallback)
+	comparePackageGraphs(t, custom.Packages, fallback.Packages, true)
+}
+
+func TestLoadTypedPackageGraphCustomBodyOnlyEditWarmParity(t *testing.T) {
+	root := t.TempDir()
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"import \"fmt\"",
+		"",
+		"func Message() string {",
+		"\treturn fmt.Sprint(\"before\")",
+		"}",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/app/dep\"",
+		"",
+		"func Init() string { return dep.Message() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "HOME="+homeDir)
+	first := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeCustom)
+	if len(first.Packages) != 1 || len(first.Packages[0].Errors) != 0 {
+		t.Fatalf("first custom load returned errors: %+v", first.Packages)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"import \"fmt\"",
+		"",
+		"func Message() string {",
+		"\treturn fmt.Sprint(\"after\")",
+		"}",
+		"",
+	}, "\n"))
+
+	custom := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeCustom)
+	fallback := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeFallback)
+	compareRootPackagesOnly(t, custom.Packages, fallback.Packages, true)
+	comparePackageByPath(t, custom.Packages, fallback.Packages, "example.com/app/dep", true)
+}
+
+func TestLoadTypedPackageGraphCustomReplaceNestedModuleParity(t *testing.T) {
+	root := t.TempDir()
+	appRoot := filepath.Join(root, "appmod")
+	depRoot := filepath.Join(appRoot, "third_party", "depmod")
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(depRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"func New() string { return \"ok\" }",
+		"",
+	}, "\n"))
+
+	writeTestFile(t, filepath.Join(appRoot, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require example.com/dep v0.0.0",
+		"",
+		"replace example.com/dep => ./third_party/depmod",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "app.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Use() string { return dep.New() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "HOME="+homeDir)
+	first := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	if len(first.Packages) != 1 || len(first.Packages[0].Errors) != 0 {
+		t.Fatalf("first custom load returned errors: %+v", first.Packages)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"type Logger interface { Log(string) }",
+		"",
+		"type NoopLogger struct{}",
+		"",
+		"func (NoopLogger) Log(string) {}",
+		"",
+		"func New(Logger) string { return \"ok\" }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "app.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Use() string {",
+		"\tvar logger dep.Logger = dep.NoopLogger{}",
+		"\treturn dep.New(logger)",
+		"}",
+		"",
+	}, "\n"))
+
+	custom := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	fallback := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeFallback)
+	compareRootPackagesOnly(t, custom.Packages, fallback.Packages, true)
+	comparePackageByPath(t, custom.Packages, fallback.Packages, "example.com/dep", false)
+}
+
+func TestLoadTypedPackageGraphCustomReplaceChainParity(t *testing.T) {
+	root := t.TempDir()
+	depRoot := filepath.Join(root, "depmod")
+	midRoot := filepath.Join(root, "midmod")
+	appRoot := filepath.Join(root, "appmod")
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(depRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"func New() string { return \"ok\" }",
+		"",
+	}, "\n"))
+
+	writeTestFile(t, filepath.Join(midRoot, "go.mod"), "module example.com/mid\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(midRoot, "mid.go"), strings.Join([]string{
+		"package mid",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Use() string { return dep.New() }",
+		"",
+	}, "\n"))
+
+	writeTestFile(t, filepath.Join(appRoot, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require (",
+		"\texample.com/dep v0.0.0",
+		"\texample.com/mid v0.0.0",
+		")",
+		"",
+		"replace example.com/dep => " + depRoot,
+		"replace example.com/mid => " + midRoot,
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "app.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/mid\"",
+		"",
+		"func Use() string { return mid.Use() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "HOME="+homeDir)
+	first := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	if len(first.Packages) != 1 || len(first.Packages[0].Errors) != 0 {
+		t.Fatalf("first custom load returned errors: %+v", first.Packages)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"type Logger interface { Log(string) }",
+		"",
+		"type NoopLogger struct{}",
+		"",
+		"func (NoopLogger) Log(string) {}",
+		"",
+		"func New(Logger) string { return \"ok\" }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(midRoot, "mid.go"), strings.Join([]string{
+		"package mid",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Use() string {",
+		"\tvar logger dep.Logger = dep.NoopLogger{}",
+		"\treturn dep.New(logger)",
+		"}",
+		"",
+	}, "\n"))
+
+	custom := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	fallback := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeFallback)
+	compareRootPackagesOnly(t, custom.Packages, fallback.Packages, true)
+	comparePackageByPath(t, custom.Packages, fallback.Packages, "example.com/mid", false)
+	comparePackageByPath(t, custom.Packages, fallback.Packages, "example.com/dep", false)
+}
+
+func TestLoadTypedPackageGraphCustomGoWorkWorkspaceParity(t *testing.T) {
+	root := t.TempDir()
+	appRoot := filepath.Join(root, "appmod")
+	depRoot := filepath.Join(root, "depmod")
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(root, "go.work"), strings.Join([]string{
+		"go 1.19",
+		"",
+		"use (",
+		"\t./appmod",
+		"\t./depmod",
+		")",
+		"",
+	}, "\n"))
+
+	writeTestFile(t, filepath.Join(depRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"func New() string { return \"ok\" }",
+		"",
+	}, "\n"))
+
+	writeTestFile(t, filepath.Join(appRoot, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require example.com/dep v0.0.0",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "app.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Use() string { return dep.New() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "HOME="+homeDir)
+	first := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	if len(first.Packages) != 1 || len(first.Packages[0].Errors) != 0 {
+		t.Fatalf("first custom load returned errors: %+v", first.Packages)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"import \"strings\"",
+		"",
+		"type Logger interface { Log(string) }",
+		"",
+		"type NoopLogger struct{}",
+		"",
+		"func (NoopLogger) Log(string) {}",
+		"",
+		"func New(Logger) string { return strings.TrimSpace(\" ok \") }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "app.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Use() string {",
+		"\tvar logger dep.Logger = dep.NoopLogger{}",
+		"\treturn dep.New(logger)",
+		"}",
+		"",
+	}, "\n"))
+
+	custom := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	fallback := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeFallback)
+	compareRootPackagesOnly(t, custom.Packages, fallback.Packages, true)
+	comparePackageByPath(t, custom.Packages, fallback.Packages, "example.com/dep", false)
+}
+
+func TestLoadTypedPackageGraphCustomCrossWorkspaceModuleIsolation(t *testing.T) {
+	cacheHome := t.TempDir()
+	repoOne := filepath.Join(t.TempDir(), "repo-one")
+	repoTwo := filepath.Join(t.TempDir(), "repo-two")
+
+	writeTestFile(t, filepath.Join(repoOne, "go.mod"), "module example.com/app\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(repoOne, "dep", "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"func Message() string { return \"one\" }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(repoOne, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/app/dep\"",
+		"",
+		"func Init() string { return dep.Message() }",
+		"",
+	}, "\n"))
+
+	writeTestFile(t, filepath.Join(repoTwo, "go.mod"), "module example.com/app\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(repoTwo, "dep", "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"import \"strings\"",
+		"",
+		"func Message() string { return strings.ToUpper(\"two\") }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(repoTwo, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/app/dep\"",
+		"",
+		"func Init() string { return dep.Message() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "HOME="+cacheHome)
+	warm := loadTypedPackageGraphForTest(t, repoOne, env, "example.com/app/app", ModeCustom)
+	if len(warm.Packages) != 1 || len(warm.Packages[0].Errors) != 0 {
+		t.Fatalf("repo one warm custom load returned errors: %+v", warm.Packages)
+	}
+
+	custom := loadTypedPackageGraphForTest(t, repoTwo, env, "example.com/app/app", ModeCustom)
+	fallback := loadTypedPackageGraphForTest(t, repoTwo, env, "example.com/app/app", ModeFallback)
+	compareRootPackagesOnly(t, custom.Packages, fallback.Packages, true)
+	comparePackageByPath(t, custom.Packages, fallback.Packages, "example.com/app/dep", true)
+}
+
+func TestDiscoveryCacheInvalidatesOnLocalImportChangeEndToEnd(t *testing.T) {
+	root := t.TempDir()
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"func Base() string { return \"base\" }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(root, "extra", "extra.go"), strings.Join([]string{
+		"package extra",
+		"",
+		"func Value() string { return \"extra\" }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/app/dep\"",
+		"",
+		"func Init() string { return dep.Base() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "HOME="+homeDir)
+	first := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeCustom)
+	if len(first.Packages) != 1 || len(first.Packages[0].Errors) != 0 {
+		t.Fatalf("first custom load returned errors: %+v", first.Packages)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"import \"example.com/app/extra\"",
+		"",
+		"func Base() string { return extra.Value() }",
+		"",
+	}, "\n"))
+
+	custom := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeCustom)
+	fallback := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeFallback)
+	comparePackageGraphs(t, custom.Packages, fallback.Packages, true)
+}
+
+func TestLoadTypedPackageGraphCustomLocalShapeChangeWarmParity(t *testing.T) {
+	root := t.TempDir()
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"type T struct{}",
+		"",
+		"func New() *T { return &T{} }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/app/dep\"",
+		"",
+		"func Init() *dep.T { return dep.New() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "HOME="+homeDir)
+	first := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeCustom)
+	if len(first.Packages) != 1 || len(first.Packages[0].Errors) != 0 {
+		t.Fatalf("first custom load returned errors: %+v", first.Packages)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"type Config struct{}",
+		"",
+		"type T struct{}",
+		"",
+		"func New(Config) *T { return &T{} }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/app/dep\"",
+		"",
+		"func Init() *dep.T { return dep.New(dep.Config{}) }",
+		"",
+	}, "\n"))
+
+	custom := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeCustom)
+	fallback := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeFallback)
+	comparePackageGraphs(t, custom.Packages, fallback.Packages, true)
+}
+
+func TestLoadTypedPackageGraphCustomTransitiveBodyOnlyWarmParity(t *testing.T) {
+	root := t.TempDir()
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(root, "b", "b.go"), strings.Join([]string{
+		"package b",
+		"",
+		"import \"fmt\"",
+		"",
+		"func Message() string { return fmt.Sprint(\"before\") }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(root, "a", "a.go"), strings.Join([]string{
+		"package a",
+		"",
+		"import \"example.com/app/b\"",
+		"",
+		"func Message() string { return b.Message() }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/app/a\"",
+		"",
+		"func Init() string { return a.Message() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "HOME="+homeDir)
+	first := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeCustom)
+	if len(first.Packages) != 1 || len(first.Packages[0].Errors) != 0 {
+		t.Fatalf("first custom load returned errors: %+v", first.Packages)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(root, "b", "b.go"), strings.Join([]string{
+		"package b",
+		"",
+		"import \"fmt\"",
+		"",
+		"func Message() string { return fmt.Sprint(\"after\") }",
+		"",
+	}, "\n"))
+
+	custom := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeCustom)
+	fallback := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeFallback)
+	compareRootPackagesOnly(t, custom.Packages, fallback.Packages, true)
+	comparePackageByPath(t, custom.Packages, fallback.Packages, "example.com/app/a", true)
+	comparePackageByPath(t, custom.Packages, fallback.Packages, "example.com/app/b", true)
+}
+
+func TestLoadTypedPackageGraphCustomKnownShapeToggleWarmParity(t *testing.T) {
+	root := t.TempDir()
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"type Config struct { Name string }",
+		"",
+		"func New(Config) string { return \"config\" }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/app/dep\"",
+		"",
+		"func Init() string { return dep.New(dep.Config{Name: \"a\"}) }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "HOME="+homeDir)
+	first := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeCustom)
+	if len(first.Packages) != 1 || len(first.Packages[0].Errors) != 0 {
+		t.Fatalf("first custom load returned errors: %+v", first.Packages)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"type Logger interface { Log(string) }",
+		"",
+		"type NoopLogger struct{}",
+		"",
+		"func (NoopLogger) Log(string) {}",
+		"",
+		"func New(Logger) string { return \"logger\" }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/app/dep\"",
+		"",
+		"func Init() string {",
+		"\tvar logger dep.Logger = dep.NoopLogger{}",
+		"\treturn dep.New(logger)",
+		"}",
+		"",
+	}, "\n"))
+
+	custom := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeCustom)
+	fallback := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeFallback)
+	comparePackageGraphs(t, custom.Packages, fallback.Packages, true)
+}
+
+func TestLoadTypedPackageGraphCustomNewShapeWarmParity(t *testing.T) {
+	root := t.TempDir()
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module example.com/app\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"func New() string { return \"ok\" }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/app/dep\"",
+		"",
+		"func Init() string { return dep.New() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "HOME="+homeDir)
+	first := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeCustom)
+	if len(first.Packages) != 1 || len(first.Packages[0].Errors) != 0 {
+		t.Fatalf("first custom load returned errors: %+v", first.Packages)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(root, "dep", "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"type Config struct{}",
+		"",
+		"func New() string { return \"ok\" }",
+		"",
+		"func NewWithConfig(Config) string { return \"ok\" }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/app/dep\"",
+		"",
+		"func Init() string { return dep.NewWithConfig(dep.Config{}) }",
+		"",
+	}, "\n"))
+
+	custom := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeCustom)
+	fallback := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeFallback)
+	comparePackageGraphs(t, custom.Packages, fallback.Packages, true)
+}
+
+func TestLoadTypedPackageGraphCustomReplaceTargetBodyOnlyWarmParity(t *testing.T) {
+	root := t.TempDir()
+	depRoot := filepath.Join(root, "depmod")
+	appRoot := filepath.Join(root, "appmod")
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(depRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"import \"fmt\"",
+		"",
+		"func Message() string { return fmt.Sprint(\"before\") }",
+		"",
+	}, "\n"))
+
+	writeTestFile(t, filepath.Join(appRoot, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require example.com/dep v0.0.0",
+		"",
+		"replace example.com/dep => " + depRoot,
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "app.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Use() string { return dep.Message() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "HOME="+homeDir)
+	first := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	if len(first.Packages) != 1 || len(first.Packages[0].Errors) != 0 {
+		t.Fatalf("first custom load returned errors: %+v", first.Packages)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"import \"fmt\"",
+		"",
+		"func Message() string { return fmt.Sprint(\"after\") }",
+		"",
+	}, "\n"))
+
+	custom := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	fallback := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeFallback)
+	compareRootPackagesOnly(t, custom.Packages, fallback.Packages, true)
+	comparePackageByPath(t, custom.Packages, fallback.Packages, "example.com/dep", false)
+}
+
+func TestLoadTypedPackageGraphCustomReplaceTargetShapeChangeWarmParity(t *testing.T) {
+	root := t.TempDir()
+	depRoot := filepath.Join(root, "depmod")
+	appRoot := filepath.Join(root, "appmod")
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(depRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"func New() string { return \"ok\" }",
+		"",
+	}, "\n"))
+
+	writeTestFile(t, filepath.Join(appRoot, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require example.com/dep v0.0.0",
+		"",
+		"replace example.com/dep => " + depRoot,
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "app.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Use() string { return dep.New() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "HOME="+homeDir)
+	first := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	if len(first.Packages) != 1 || len(first.Packages[0].Errors) != 0 {
+		t.Fatalf("first custom load returned errors: %+v", first.Packages)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"type Logger interface { Log(string) }",
+		"",
+		"type NoopLogger struct{}",
+		"",
+		"func (NoopLogger) Log(string) {}",
+		"",
+		"func New(Logger) string { return \"ok\" }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "app.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Use() string {",
+		"\tvar logger dep.Logger = dep.NoopLogger{}",
+		"\treturn dep.New(logger)",
+		"}",
+		"",
+	}, "\n"))
+
+	custom := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	fallback := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeFallback)
+	compareRootPackagesOnly(t, custom.Packages, fallback.Packages, true)
+	comparePackageByPath(t, custom.Packages, fallback.Packages, "example.com/dep", false)
+}
+
+func TestLoadTypedPackageGraphCustomFixtureAppWarmMutationParity(t *testing.T) {
+	root := t.TempDir()
+	appRoot := filepath.Join(root, "appmod")
+	depRoot := filepath.Join(root, "depmod")
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(depRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"import \"fmt\"",
+		"",
+		"func Message() string { return fmt.Sprint(\"dep\") }",
+		"",
+	}, "\n"))
+
+	writeTestFile(t, filepath.Join(appRoot, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require example.com/dep v0.0.0",
+		"",
+		"replace example.com/dep => " + depRoot,
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "base", "base.go"), strings.Join([]string{
+		"package base",
+		"",
+		"import \"fmt\"",
+		"",
+		"func Prefix() string { return fmt.Sprint(\"base:\") }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "gen", "zz_generated.go"), strings.Join([]string{
+		"package gen",
+		"",
+		"func Value() string { return \"generated\" }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "feature", "feature.go"), strings.Join([]string{
+		"package feature",
+		"",
+		"import (",
+		"\t\"example.com/app/base\"",
+		"\t\"example.com/app/gen\"",
+		"\t\"example.com/dep\"",
+		")",
+		"",
+		"func Message() string {",
+		"\treturn base.Prefix() + dep.Message() + gen.Value()",
+		"}",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/app/feature\"",
+		"",
+		"func Init() string { return feature.Message() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "HOME="+homeDir)
+	coldCustom := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	if len(coldCustom.Packages) != 1 || len(coldCustom.Packages[0].Errors) != 0 {
+		t.Fatalf("cold custom load returned errors: %+v", coldCustom.Packages)
+	}
+	coldFallback := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeFallback)
+	compareRootPackagesOnly(t, coldCustom.Packages, coldFallback.Packages, true)
+	comparePackageByPath(t, coldCustom.Packages, coldFallback.Packages, "example.com/app/feature", true)
+	comparePackageByPath(t, coldCustom.Packages, coldFallback.Packages, "example.com/app/gen", true)
+	comparePackageByPath(t, coldCustom.Packages, coldFallback.Packages, "example.com/dep", false)
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"import \"fmt\"",
+		"",
+		"type Logger interface { Log(string) }",
+		"",
+		"type NoopLogger struct{}",
+		"",
+		"func (NoopLogger) Log(string) {}",
+		"",
+		"func Message(Logger) string { return fmt.Sprint(\"dep2\") }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "gen", "zz_generated.go"), strings.Join([]string{
+		"package gen",
+		"",
+		"func Value() string { return \"generated2\" }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "feature", "feature.go"), strings.Join([]string{
+		"package feature",
+		"",
+		"import (",
+		"\t\"example.com/app/base\"",
+		"\t\"example.com/app/gen\"",
+		"\t\"example.com/dep\"",
+		")",
+		"",
+		"func Message() string {",
+		"\tvar logger dep.Logger = dep.NoopLogger{}",
+		"\treturn base.Prefix() + dep.Message(logger) + gen.Value()",
+		"}",
+		"",
+	}, "\n"))
+
+	warmCustom := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	warmFallback := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeFallback)
+	compareRootPackagesOnly(t, warmCustom.Packages, warmFallback.Packages, true)
+	comparePackageByPath(t, warmCustom.Packages, warmFallback.Packages, "example.com/app/feature", true)
+	comparePackageByPath(t, warmCustom.Packages, warmFallback.Packages, "example.com/app/gen", true)
+	comparePackageByPath(t, warmCustom.Packages, warmFallback.Packages, "example.com/dep", false)
+}
+
+func TestLoadTypedPackageGraphCustomSequentialMutationsParity(t *testing.T) {
+	root := t.TempDir()
+	depRoot := filepath.Join(root, "depmod")
+	appRoot := filepath.Join(root, "appmod")
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(depRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"import \"fmt\"",
+		"",
+		"func Message() string { return fmt.Sprint(\"dep\") }",
+		"",
+	}, "\n"))
+
+	writeTestFile(t, filepath.Join(appRoot, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require example.com/dep v0.0.0",
+		"",
+		"replace example.com/dep => " + depRoot,
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "helper", "helper.go"), strings.Join([]string{
+		"package helper",
+		"",
+		"func Prefix() string { return \"prefix:\" }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Init() string { return dep.Message() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(), "HOME="+homeDir)
+
+	assertParity := func() {
+		custom := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+		fallback := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeFallback)
+		compareRootPackagesOnly(t, custom.Packages, fallback.Packages, true)
+		comparePackageByPath(t, custom.Packages, fallback.Packages, "example.com/dep", false)
+	}
+
+	initial := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	if len(initial.Packages) != 1 || len(initial.Packages[0].Errors) != 0 {
+		t.Fatalf("initial custom load returned errors: %+v", initial.Packages)
+	}
+	assertParity()
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"import \"fmt\"",
+		"",
+		"func Message() string { return fmt.Sprint(\"dep-body\") }",
+		"",
+	}, "\n"))
+	assertParity()
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(appRoot, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import (",
+		"\t\"example.com/app/helper\"",
+		"\t\"example.com/dep\"",
+		")",
+		"",
+		"func Init() string { return helper.Prefix() + dep.Message() }",
+		"",
+	}, "\n"))
+	assertParity()
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"import \"fmt\"",
+		"",
+		"type Logger interface { Log(string) }",
+		"",
+		"type NoopLogger struct{}",
+		"",
+		"func (NoopLogger) Log(string) {}",
+		"",
+		"func Message(Logger) string { return fmt.Sprint(\"dep-shape\") }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import (",
+		"\t\"example.com/app/helper\"",
+		"\t\"example.com/dep\"",
+		")",
+		"",
+		"func Init() string {",
+		"\tvar logger dep.Logger = dep.NoopLogger{}",
+		"\treturn helper.Prefix() + dep.Message(logger)",
+		"}",
+		"",
+	}, "\n"))
+	assertParity()
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"import \"fmt\"",
+		"",
+		"func Message() string { return fmt.Sprint(\"dep\") }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Init() string { return dep.Message() }",
+		"",
+	}, "\n"))
+	assertParity()
+}
+
+func TestDiscoveryCacheInvalidatesOnGoSumResolutionChange(t *testing.T) {
+	root := t.TempDir()
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(root, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require github.com/google/go-cmp v0.6.0",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(root, "go.sum"), strings.Join([]string{
+		"github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=",
+		"github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"github.com/google/go-cmp/cmp\"",
+		"",
+		"func Init() string { return cmp.Diff(\"a\", \"b\") }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(),
+		"HOME="+homeDir,
+		"GOPROXY=off",
+		"GONOSUMDB=*",
+		"GOCACHE=/tmp/gocache",
+		"GOMODCACHE=/tmp/gomodcache",
+	)
+
+	first := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeCustom)
+	if len(first.Packages) != 1 {
+		t.Fatalf("first custom packages len = %d, want 1", len(first.Packages))
+	}
+	if got := comparableErrors(first.Packages[0].Errors); len(got) != 0 {
+		t.Fatalf("first custom load returned errors: %v", got)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(root, "go.sum"), "")
+
+	custom := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeCustom)
+	fallback := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeFallback)
+	compareRootPackagesOnly(t, custom.Packages, fallback.Packages, true)
+}
+
+func TestLoadTypedPackageGraphCustomExternalVersionChangeBustsCache(t *testing.T) {
+	root := t.TempDir()
+	proxyDir := t.TempDir()
+	artifactDir := t.TempDir()
+	homeDir := t.TempDir()
+
+	writeModuleProxyVersion(t, proxyDir, "example.com/extdep", "v1.0.0", map[string]string{
+		"pkg/pkg.go": "package pkg\n\nfunc Version() string { return \"v1.0.0\" }\n",
+	})
+	writeModuleProxyVersion(t, proxyDir, "example.com/extdep", "v1.1.0", map[string]string{
+		"pkg/pkg.go": "package pkg\n\nimport \"strings\"\n\nfunc Version() string { return strings.TrimSpace(\"v1.1.0\") }\n",
+	})
+
+	writeTestFile(t, filepath.Join(root, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require example.com/extdep v1.0.0",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(root, "app", "wire.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/extdep/pkg\"",
+		"",
+		"func Init() string { return pkg.Version() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(),
+		"HOME="+homeDir,
+		"GOPROXY=file://"+proxyDir,
+		"GOSUMDB=off",
+		"GOCACHE=/tmp/gocache",
+		"GOMODCACHE=/tmp/gomodcache",
+		loaderArtifactEnv+"=1",
+		loaderArtifactDirEnv+"="+artifactDir,
+	)
+	runGoModTidyForTest(t, root, env)
+
+	first := loadPackagesForTest(t, root, env, []string{"./app"}, ModeCustom)
+	if len(first.Packages) != 1 || len(first.Packages[0].Errors) != 0 {
+		t.Fatalf("first custom load returned errors: %+v", first.Packages)
+	}
+	firstDep := collectGraph(first.Packages)["example.com/extdep/pkg"]
+	if firstDep == nil {
+		t.Fatal("expected dependency package for example.com/extdep/pkg")
+	}
+	if !containsPathSubstring(firstDep.CompiledGoFiles, "example.com/extdep@v1.0.0") {
+		t.Fatalf("first dependency files = %v, want version v1.0.0", firstDep.CompiledGoFiles)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(root, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require example.com/extdep v1.1.0",
+		"",
+	}, "\n"))
+	runGoModTidyForTest(t, root, env)
+
+	custom := loadPackagesForTest(t, root, env, []string{"./app"}, ModeCustom)
+	fallback := loadPackagesForTest(t, root, env, []string{"./app"}, ModeFallback)
+	compareRootPackagesOnly(t, custom.Packages, fallback.Packages, true)
+	comparePackageByPath(t, custom.Packages, fallback.Packages, "example.com/extdep/pkg", false)
+
+	secondDep := collectGraph(custom.Packages)["example.com/extdep/pkg"]
+	if secondDep == nil {
+		t.Fatal("expected dependency package for example.com/extdep/pkg after version change")
+	}
+	if !containsPathSubstring(secondDep.CompiledGoFiles, "example.com/extdep@v1.1.0") {
+		t.Fatalf("second dependency files = %v, want version v1.1.0", secondDep.CompiledGoFiles)
+	}
+}
+
 func TestLoaderArtifactKeyExternalChangesWhenExportFileChanges(t *testing.T) {
 	exportPath := filepath.Join(t.TempDir(), "dep.a")
 	writeTestFile(t, exportPath, "first export payload")
@@ -860,6 +2379,225 @@ func TestLoaderArtifactKeyExternalWithoutExportChangesWhenSourceChanges(t *testi
 	if first == second {
 		t.Fatalf("loaderArtifactKey did not change after external source update without export data: %q", first)
 	}
+}
+
+func TestRunGoListIncludesExportDataForReplacedModule(t *testing.T) {
+	root := t.TempDir()
+	depRoot := filepath.Join(root, "depmod")
+	appRoot := filepath.Join(root, "appmod")
+
+	writeTestFile(t, filepath.Join(depRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), "package dep\n\nfunc New() string { return \"ok\" }\n")
+
+	writeTestFile(t, filepath.Join(appRoot, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require example.com/dep v0.0.0",
+		"",
+		"replace example.com/dep => " + depRoot,
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "app.go"), "package app\n\nimport \"example.com/dep\"\n\nfunc Use() string { return dep.New() }\n")
+
+	meta, err := runGoList(context.Background(), goListRequest{
+		WD:       appRoot,
+		Env:      append(os.Environ(), "GOCACHE=/tmp/gocache", "GOMODCACHE=/tmp/gomodcache"),
+		Patterns: []string{"example.com/app/app"},
+		NeedDeps: true,
+	})
+	if err != nil {
+		t.Fatalf("runGoList() error = %v", err)
+	}
+	depMeta := meta["example.com/dep"]
+	if depMeta == nil {
+		t.Fatal("expected metadata for example.com/dep")
+	}
+	if depMeta.Export == "" {
+		t.Fatalf("expected export data path for replaced module metadata: %+v", depMeta)
+	}
+}
+
+func TestLoadTypedPackageGraphCustomReplaceTargetWithExportDataWarmParity(t *testing.T) {
+	root := t.TempDir()
+	depRoot := filepath.Join(root, "depmod")
+	appRoot := filepath.Join(root, "appmod")
+	artifactDir := t.TempDir()
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(depRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"func New() string { return \"ok\" }",
+		"",
+	}, "\n"))
+
+	writeTestFile(t, filepath.Join(appRoot, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require example.com/dep v0.0.0",
+		"",
+		"replace example.com/dep => " + depRoot,
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "app.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Use() string { return dep.New() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(),
+		"HOME="+homeDir,
+		"GOCACHE=/tmp/gocache",
+		"GOMODCACHE=/tmp/gomodcache",
+		loaderArtifactEnv+"=1",
+		loaderArtifactDirEnv+"="+artifactDir,
+	)
+
+	meta, err := runGoList(context.Background(), goListRequest{
+		WD:       appRoot,
+		Env:      env,
+		Patterns: []string{"example.com/app/app"},
+		NeedDeps: true,
+	})
+	if err != nil {
+		t.Fatalf("runGoList() error = %v", err)
+	}
+	depMeta := meta["example.com/dep"]
+	if depMeta == nil || depMeta.Export == "" {
+		t.Fatalf("expected export-backed metadata for example.com/dep: %+v", depMeta)
+	}
+
+	first := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	if len(first.Packages) != 1 || len(first.Packages[0].Errors) != 0 {
+		t.Fatalf("first custom load returned errors: %+v", first.Packages)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"type Logger interface { Log(string) }",
+		"",
+		"type NoopLogger struct{}",
+		"",
+		"func (NoopLogger) Log(string) {}",
+		"",
+		"func New(Logger) string { return \"ok\" }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "app.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Use() string {",
+		"\tvar logger dep.Logger = dep.NoopLogger{}",
+		"\treturn dep.New(logger)",
+		"}",
+		"",
+	}, "\n"))
+
+	custom := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	fallback := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeFallback)
+	compareRootPackagesOnly(t, custom.Packages, fallback.Packages, true)
+	comparePackageByPath(t, custom.Packages, fallback.Packages, "example.com/dep", false)
+}
+
+func TestLoadTypedPackageGraphCustomReplaceTargetWithoutExportDataWarmParity(t *testing.T) {
+	root := t.TempDir()
+	depRoot := filepath.Join(root, "depmod")
+	appRoot := filepath.Join(root, "appmod")
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(depRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"//go:build never",
+		"",
+		"func New() string { return \"ok\" }",
+		"",
+	}, "\n"))
+
+	writeTestFile(t, filepath.Join(appRoot, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require example.com/dep v0.0.0",
+		"",
+		"replace example.com/dep => " + depRoot,
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "app.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Use() string { return dep.New() }",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(),
+		"HOME="+homeDir,
+		"GOCACHE=/tmp/gocache",
+		"GOMODCACHE=/tmp/gomodcache",
+	)
+
+	meta, err := runGoList(context.Background(), goListRequest{
+		WD:       appRoot,
+		Env:      env,
+		Patterns: []string{"example.com/app/app"},
+		NeedDeps: true,
+	})
+	if err != nil {
+		t.Fatalf("runGoList(first) error = %v", err)
+	}
+	depMeta := meta["example.com/dep"]
+	if depMeta == nil || depMeta.Export != "" {
+		t.Fatalf("expected no export data for incomplete replaced module: %+v", depMeta)
+	}
+
+	first := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	if len(first.Packages) != 1 {
+		t.Fatalf("first custom packages len = %d, want 1", len(first.Packages))
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"var _ missing",
+		"",
+		"func New() string { return \"ok\" }",
+		"",
+	}, "\n"))
+
+	meta, err = runGoList(context.Background(), goListRequest{
+		WD:       appRoot,
+		Env:      env,
+		Patterns: []string{"example.com/app/app"},
+		NeedDeps: true,
+	})
+	if err != nil {
+		t.Fatalf("runGoList(second) error = %v", err)
+	}
+	depMeta = meta["example.com/dep"]
+	if depMeta == nil || depMeta.Export != "" {
+		t.Fatalf("expected no export data for second incomplete replaced module state: %+v", depMeta)
+	}
+
+	custom := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeCustom)
+	fallback := loadTypedPackageGraphForTest(t, appRoot, env, "example.com/app/app", ModeFallback)
+	compareRootPackagesOnly(t, custom.Packages, fallback.Packages, true)
 }
 
 func TestLoadTypedPackageGraphCustomExternalArtifactCacheRealAppParity(t *testing.T) {
@@ -1142,6 +2880,44 @@ func compareRootPackagesOnly(t *testing.T, got []*packages.Package, want []*pack
 	}
 }
 
+func comparePackageByPath(t *testing.T, got []*packages.Package, want []*packages.Package, pkgPath string, requireTyped bool) {
+	t.Helper()
+	gotPkg := collectGraph(got)[pkgPath]
+	if gotPkg == nil {
+		t.Fatalf("missing package %q in custom graph", pkgPath)
+	}
+	wantPkg := collectGraph(want)[pkgPath]
+	if wantPkg == nil {
+		t.Fatalf("missing package %q in fallback graph", pkgPath)
+	}
+	if gotPkg.Name != wantPkg.Name {
+		t.Fatalf("package %q name = %q, want %q", pkgPath, gotPkg.Name, wantPkg.Name)
+	}
+	if !equalStrings(gotPkg.CompiledGoFiles, wantPkg.CompiledGoFiles) {
+		t.Fatalf("package %q compiled files = %v, want %v", pkgPath, gotPkg.CompiledGoFiles, wantPkg.CompiledGoFiles)
+	}
+	if !equalImportPaths(gotPkg.Imports, wantPkg.Imports) {
+		t.Fatalf("package %q imports = %v, want %v", pkgPath, sortedImportPaths(gotPkg.Imports), sortedImportPaths(wantPkg.Imports))
+	}
+	gotErrs := comparableErrors(gotPkg.Errors)
+	wantErrs := comparableErrors(wantPkg.Errors)
+	if len(gotErrs) != len(wantErrs) {
+		t.Fatalf("package %q comparable errors len = %d, want %d; got=%v want=%v", pkgPath, len(gotErrs), len(wantErrs), gotErrs, wantErrs)
+	}
+	for i := range gotErrs {
+		if gotErrs[i] != wantErrs[i] {
+			t.Fatalf("package %q comparable error[%d] = %q, want %q", pkgPath, i, gotErrs[i], wantErrs[i])
+		}
+	}
+	if requireTyped {
+		gotTyped := gotPkg.Types != nil && gotPkg.TypesInfo != nil && len(gotPkg.Syntax) > 0
+		wantTyped := wantPkg.Types != nil && wantPkg.TypesInfo != nil && len(wantPkg.Syntax) > 0
+		if gotTyped != wantTyped {
+			t.Fatalf("package %q typed state = %v, want %v", pkgPath, gotTyped, wantTyped)
+		}
+	}
+}
+
 func collectGraph(roots []*packages.Package) map[string]*packages.Package {
 	out := make(map[string]*packages.Package)
 	stack := append([]*packages.Package(nil), roots...)
@@ -1157,6 +2933,68 @@ func collectGraph(roots []*packages.Package) map[string]*packages.Package {
 		}
 	}
 	return out
+}
+
+func loadTypedPackageGraphForTest(t *testing.T, wd string, env []string, pkg string, mode Mode) *LazyLoadResult {
+	return loadTypedPackageGraphWithDiscoveryForTest(t, wd, env, pkg, mode, nil)
+}
+
+func loadPackagesForTest(t *testing.T, wd string, env []string, patterns []string, mode Mode) *PackageLoadResult {
+	t.Helper()
+	l := New()
+	got, err := l.LoadPackages(context.Background(), PackageLoadRequest{
+		WD:         wd,
+		Env:        env,
+		Patterns:   patterns,
+		Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax | packages.NeedExportFile,
+		LoaderMode: mode,
+		Fset:       token.NewFileSet(),
+		ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+			return parser.ParseFile(fset, filename, src, parser.ParseComments|parser.SkipObjectResolution)
+		},
+	})
+	if err != nil {
+		t.Fatalf("LoadPackages(%q, %q) error = %v", wd, mode, err)
+	}
+	return got
+}
+
+func loadTypedPackageGraphWithDiscoveryForTest(t *testing.T, wd string, env []string, pkg string, mode Mode, discovery *DiscoverySnapshot) *LazyLoadResult {
+	t.Helper()
+	l := New()
+	got, err := l.LoadTypedPackageGraph(context.Background(), LazyLoadRequest{
+		WD:         wd,
+		Env:        env,
+		Package:    pkg,
+		Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax | packages.NeedExportFile,
+		LoaderMode: mode,
+		Fset:       token.NewFileSet(),
+		ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+			return parser.ParseFile(fset, filename, src, parser.ParseComments|parser.SkipObjectResolution)
+		},
+		Discovery: discovery,
+	})
+	if err != nil {
+		t.Fatalf("LoadTypedPackageGraph(%q, %q) error = %v", wd, mode, err)
+	}
+	return got
+}
+
+func loadRootGraphForTest(t *testing.T, wd string, env []string, patterns []string, mode Mode) *RootLoadResult {
+	t.Helper()
+	l := New()
+	got, err := l.LoadRootGraph(context.Background(), RootLoadRequest{
+		WD:       wd,
+		Env:      env,
+		Patterns: patterns,
+		NeedDeps: true,
+		Mode:     mode,
+		Fset:     token.NewFileSet(),
+	})
+	if err != nil {
+		t.Fatalf("LoadRootGraph(%q, %q) error = %v", wd, mode, err)
+	}
+	return got
 }
 
 func compiledFileCount(pkgs map[string]*packages.Package) int {
@@ -1200,6 +3038,85 @@ func sortedImportPaths(m map[string]*packages.Package) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func containsPathSubstring(paths []string, needle string) bool {
+	for _, path := range paths {
+		if strings.Contains(normalizePathForCompare(path), needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func runGoModTidyForTest(t *testing.T, wd string, env []string) {
+	t.Helper()
+	cmd := exec.Command("go", "mod", "tidy")
+	cmd.Dir = wd
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go mod tidy in %q error = %v: %s", wd, err, out)
+	}
+}
+
+func writeModuleProxyVersion(t *testing.T, proxyDir string, modulePath string, version string, files map[string]string) {
+	t.Helper()
+	base := filepath.Join(proxyDir, filepath.FromSlash(modulePath), "@v")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatalf("mkdir proxy dir: %v", err)
+	}
+	listPath := filepath.Join(base, "list")
+	appendLineIfMissing(t, listPath, version)
+
+	modFile := "module " + modulePath + "\n\ngo 1.19\n"
+	writeTestFile(t, filepath.Join(base, version+".mod"), modFile)
+	writeTestFile(t, filepath.Join(base, version+".info"), fmt.Sprintf("{\"Version\":%q,\"Time\":\"2024-01-01T00:00:00Z\"}\n", version))
+
+	zipPath := filepath.Join(base, version+".zip")
+	zipFile, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatalf("create proxy zip: %v", err)
+	}
+	defer zipFile.Close()
+
+	zw := zip.NewWriter(zipFile)
+	moduleRoot := modulePath + "@" + version
+	writeZipFile := func(name string, contents string) {
+		w, err := zw.Create(moduleRoot + "/" + filepath.ToSlash(name))
+		if err != nil {
+			t.Fatalf("create zip entry %q: %v", name, err)
+		}
+		if _, err := w.Write([]byte(contents)); err != nil {
+			t.Fatalf("write zip entry %q: %v", name, err)
+		}
+	}
+	writeZipFile("go.mod", modFile)
+	for name, contents := range files {
+		writeZipFile(name, contents)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close proxy zip: %v", err)
+	}
+}
+
+func appendLineIfMissing(t *testing.T, path string, line string) {
+	t.Helper()
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read %q: %v", path, err)
+	}
+	for _, existingLine := range strings.Split(strings.TrimSpace(string(existing)), "\n") {
+		if existingLine == line {
+			return
+		}
+	}
+	content := string(existing)
+	if strings.TrimSpace(content) != "" && !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	content += line + "\n"
+	writeTestFile(t, path, content)
 }
 
 type importerFuncForTest func(string) (*types.Package, error)

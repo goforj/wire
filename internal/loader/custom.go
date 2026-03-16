@@ -641,7 +641,7 @@ func (l *customTypedGraphLoader) loadPackage(path string) (*packages.Package, er
 				return typed, nil
 			}
 			if len(dep.Errors) > 0 {
-				return nil, unsupportedError{reason: "lazy-load dependency has errors"}
+				return nil, dependencyImportError(dep)
 			}
 			return nil, unsupportedError{reason: "missing typed lazy-load dependency"}
 		}),
@@ -1098,6 +1098,22 @@ func toPackagesError(fset *token.FileSet, err error) packages.Error {
 		}
 		return packages.Error{Pos: pos, Msg: err.Error(), Kind: packages.UnknownError}
 	}
+}
+
+func dependencyImportError(pkg *packages.Package) error {
+	if pkg == nil {
+		return unsupportedError{reason: "lazy-load dependency has errors"}
+	}
+	if pkg.Name == "" {
+		return fmt.Errorf("invalid package name: %q", pkg.Name)
+	}
+	for _, err := range pkg.Errors {
+		if strings.TrimSpace(err.Msg) == "" {
+			continue
+		}
+		return fmt.Errorf("%s", err.Msg)
+	}
+	return unsupportedError{reason: "lazy-load dependency has errors"}
 }
 
 type importerFunc func(path string) (*types.Package, error)

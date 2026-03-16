@@ -46,7 +46,7 @@ func runGoList(ctx context.Context, req goListRequest) (map[string]*packageMeta,
 		return cached, nil
 	}
 	logDuration(ctx, "loader.discovery.cache_read.wall", time.Since(cacheReadStart))
-	args := []string{"list", "-json", "-e", "-compiled"}
+	args := []string{"list", "-json", "-e", "-compiled", "-export"}
 	if req.NeedDeps {
 		args = append(args, "-deps")
 	}
