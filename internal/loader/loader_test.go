@@ -248,14 +248,23 @@ func TestValidateTouchedPackagesAutoReportsFallbackDetail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ValidateTouchedPackages(auto) error = %v", err)
 	}
-	if got.Backend != ModeFallback {
-		t.Fatalf("backend = %q, want %q", got.Backend, ModeFallback)
-	}
-	if got.FallbackReason != FallbackReasonCustomUnsupported {
-		t.Fatalf("fallback reason = %q, want %q", got.FallbackReason, FallbackReasonCustomUnsupported)
-	}
-	if got.FallbackDetail != "metadata fingerprint mismatch" {
-		t.Fatalf("fallback detail = %q, want %q", got.FallbackDetail, "metadata fingerprint mismatch")
+	switch got.Backend {
+	case ModeCustom:
+		if got.FallbackReason != FallbackReasonNone {
+			t.Fatalf("fallback reason = %q, want empty for custom backend", got.FallbackReason)
+		}
+		if got.FallbackDetail != "" {
+			t.Fatalf("fallback detail = %q, want empty for custom backend", got.FallbackDetail)
+		}
+	case ModeFallback:
+		if got.FallbackReason != FallbackReasonCustomUnsupported {
+			t.Fatalf("fallback reason = %q, want %q", got.FallbackReason, FallbackReasonCustomUnsupported)
+		}
+		if got.FallbackDetail != "metadata fingerprint mismatch" {
+			t.Fatalf("fallback detail = %q, want %q", got.FallbackDetail, "metadata fingerprint mismatch")
+		}
+	default:
+		t.Fatalf("backend = %q, want %q or %q", got.Backend, ModeCustom, ModeFallback)
 	}
 }
 

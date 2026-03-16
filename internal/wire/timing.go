@@ -16,7 +16,7 @@ package wire
 
 import (
 	"context"
-	"log"
+	"fmt"
 	"time"
 )
 
@@ -52,8 +52,7 @@ func logTiming(ctx context.Context, label string, start time.Time) {
 }
 
 func debugf(ctx context.Context, format string, args ...interface{}) {
-	if timing(ctx) == nil {
-		return
+	if t := timing(ctx); t != nil {
+		t(fmt.Sprintf(format, args...), 0)
 	}
-	log.Printf("timing: "+format, args...)
 }

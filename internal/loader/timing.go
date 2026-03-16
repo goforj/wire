@@ -3,7 +3,6 @@ package loader
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 )
 
@@ -49,8 +48,7 @@ func logInt(ctx context.Context, label string, v int) {
 }
 
 func debugf(ctx context.Context, format string, args ...interface{}) {
-	if timing(ctx) == nil {
-		return
+	if t := timing(ctx); t != nil {
+		t(fmt.Sprintf(format, args...), 0)
 	}
-	log.Printf("timing: "+format, args...)
 }
