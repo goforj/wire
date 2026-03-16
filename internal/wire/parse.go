@@ -720,29 +720,11 @@ func (oc *objectCache) semanticStructProvider(item semanticcache.ProviderSetItem
 		IsStruct: true,
 		Out:      []types.Type{out, types.NewPointer(out)},
 	}
-	if item.AllFields {
-		for i := 0; i < st.NumFields(); i++ {
-			if isPrevented(st.Tag(i)) {
-				continue
-			}
-			f := st.Field(i)
-			provider.Args = append(provider.Args, ProviderInput{
-				Type:      f.Type(),
-				FieldName: f.Name(),
-			})
-		}
-	} else {
-		for _, fieldName := range item.FieldNames {
-			f := lookupStructField(st, fieldName)
-			if f == nil {
-				return nil, []error{fmt.Errorf("field %q not found in %s.%s", fieldName, item.Type.ImportPath, item.Type.Name)}
-			}
-			provider.Args = append(provider.Args, ProviderInput{
-				Type:      f.Type(),
-				FieldName: f.Name(),
-			})
-		}
+	args, errs := semanticStructProviderInputs(st, item)
+	if len(errs) > 0 {
+		return nil, errs
 	}
+	provider.Args = args
 	return provider, nil
 }
 
@@ -757,9 +739,9 @@ func (oc *objectCache) semanticFields(item semanticcache.ProviderSetItemArtifact
 	}
 	fields := make([]*Field, 0, len(item.FieldNames))
 	for _, fieldName := range item.FieldNames {
-		v := lookupStructField(structType, fieldName)
-		if v == nil {
-			return nil, []error{fmt.Errorf("field %q not found", fieldName)}
+		v, err := requiredStructField(structType, fieldName)
+		if err != nil {
+			return nil, []error{err}
 		}
 		out := []types.Type{v.Type()}
 		if ptrToField {
@@ -774,6 +756,35 @@ func (oc *objectCache) semanticFields(item semanticcache.ProviderSetItemArtifact
 		})
 	}
 	return fields, nil
+}
+
+func semanticStructProviderInputs(st *types.Struct, item semanticcache.ProviderSetItemArtifact) ([]ProviderInput, []error) {
+	if item.AllFields {
+		args := make([]ProviderInput, 0, st.NumFields())
+		for i := 0; i < st.NumFields(); i++ {
+			if isPrevented(st.Tag(i)) {
+				continue
+			}
+			f := st.Field(i)
+			args = append(args, ProviderInput{
+				Type:      f.Type(),
+				FieldName: f.Name(),
+			})
+		}
+		return args, nil
+	}
+	args := make([]ProviderInput, 0, len(item.FieldNames))
+	for _, fieldName := range item.FieldNames {
+		f, err := requiredStructField(st, fieldName)
+		if err != nil {
+			return nil, []error{fmt.Errorf("field %q not found in %s.%s", fieldName, item.Type.ImportPath, item.Type.Name)}
+		}
+		args = append(args, ProviderInput{
+			Type:      f.Type(),
+			FieldName: f.Name(),
+		})
+	}
+	return args, nil
 }
 
 func (oc *objectCache) semanticType(ref semanticcache.TypeRef) (types.Type, error) {
@@ -827,6 +838,14 @@ func lookupStructField(st *types.Struct, name string) *types.Var {
 		}
 	}
 	return nil
+}
+
+func requiredStructField(st *types.Struct, name string) (*types.Var, error) {
+	v := lookupStructField(st, name)
+	if v == nil {
+		return nil, fmt.Errorf("field %q not found", name)
+	}
+	return v, nil
 }
 
 func (oc *objectCache) semanticArtifact(pkg *packages.Package) *semanticcache.PackageArtifact {
