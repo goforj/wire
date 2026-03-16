@@ -23,7 +23,6 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -3156,11 +3155,11 @@ func tempCacheDirForTest(t *testing.T, pattern string) string {
 
 func fileURLForTest(t *testing.T, path string) string {
 	t.Helper()
-	u := &url.URL{
-		Scheme: "file",
-		Path:   filepath.ToSlash(path),
+	slashed := filepath.ToSlash(path)
+	if !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed
 	}
-	return u.String()
+	return "file://" + slashed
 }
 
 type importerFuncForTest func(string) (*types.Package, error)
