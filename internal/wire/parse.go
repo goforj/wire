@@ -655,11 +655,10 @@ func (oc *objectCache) applySemanticProviderSetItem(pset *ProviderSet, item sema
 }
 
 func (oc *objectCache) semanticProvider(importPath, name string) (*Provider, []error) {
-	pkg := oc.packages[importPath]
-	if pkg == nil || pkg.Types == nil {
-		return nil, []error{fmt.Errorf("missing typed package for %s", importPath)}
+	obj, err := oc.lookupPackageObject(importPath, name)
+	if err != nil {
+		return nil, []error{err}
 	}
-	obj := pkg.Types.Scope().Lookup(name)
 	fn, ok := obj.(*types.Func)
 	if !ok || fn == nil {
 		return nil, []error{fmt.Errorf("%s.%s is not a provider function", importPath, name)}
@@ -668,11 +667,10 @@ func (oc *objectCache) semanticProvider(importPath, name string) (*Provider, []e
 }
 
 func (oc *objectCache) semanticImportedSet(importPath, name string) (*ProviderSet, []error) {
-	pkg := oc.packages[importPath]
-	if pkg == nil || pkg.Types == nil {
-		return nil, []error{fmt.Errorf("missing typed package for %s", importPath)}
+	obj, err := oc.lookupPackageObject(importPath, name)
+	if err != nil {
+		return nil, []error{err}
 	}
-	obj := pkg.Types.Scope().Lookup(name)
 	v, ok := obj.(*types.Var)
 	if !ok || v == nil || !isProviderSetType(v.Type()) {
 		return nil, []error{fmt.Errorf("%s.%s is not a provider set", importPath, name)}
@@ -800,16 +798,23 @@ func (oc *objectCache) semanticType(ref semanticcache.TypeRef) (types.Type, erro
 }
 
 func (oc *objectCache) semanticTypeName(ref semanticcache.TypeRef) (*types.TypeName, error) {
-	pkg := oc.packages[ref.ImportPath]
-	if pkg == nil || pkg.Types == nil {
-		return nil, fmt.Errorf("missing typed package for %s", ref.ImportPath)
+	obj, err := oc.lookupPackageObject(ref.ImportPath, ref.Name)
+	if err != nil {
+		return nil, err
 	}
-	obj := pkg.Types.Scope().Lookup(ref.Name)
 	typeName, ok := obj.(*types.TypeName)
 	if !ok || typeName == nil {
 		return nil, fmt.Errorf("%s.%s is not a named type", ref.ImportPath, ref.Name)
 	}
 	return typeName, nil
+}
+
+func (oc *objectCache) lookupPackageObject(importPath, name string) (types.Object, error) {
+	pkg := oc.packages[importPath]
+	if pkg == nil || pkg.Types == nil {
+		return nil, fmt.Errorf("missing typed package for %s", importPath)
+	}
+	return pkg.Types.Scope().Lookup(name), nil
 }
 
 func structFromFieldsParent(parent types.Type) (*types.Struct, bool, error) {
