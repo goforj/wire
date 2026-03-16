@@ -23,6 +23,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2226,7 +2227,7 @@ func TestDiscoveryCacheInvalidatesOnGoSumResolutionChange(t *testing.T) {
 
 	env := append(os.Environ(),
 		"HOME="+homeDir,
-		"GOPROXY=file://"+proxyDir,
+		"GOPROXY="+fileURLForTest(t, proxyDir),
 		"GOSUMDB=off",
 		"GOCACHE="+goCacheDir,
 		"GOMODCACHE="+goModCacheDir,
@@ -2283,7 +2284,7 @@ func TestLoadTypedPackageGraphCustomExternalVersionChangeBustsCache(t *testing.T
 
 	env := append(os.Environ(),
 		"HOME="+homeDir,
-		"GOPROXY=file://"+proxyDir,
+		"GOPROXY="+fileURLForTest(t, proxyDir),
 		"GOSUMDB=off",
 		"GOCACHE="+goCacheDir,
 		"GOMODCACHE="+goModCacheDir,
@@ -3151,6 +3152,15 @@ func tempCacheDirForTest(t *testing.T, pattern string) string {
 		_ = os.RemoveAll(dir)
 	})
 	return dir
+}
+
+func fileURLForTest(t *testing.T, path string) string {
+	t.Helper()
+	u := &url.URL{
+		Scheme: "file",
+		Path:   filepath.ToSlash(path),
+	}
+	return u.String()
 }
 
 type importerFuncForTest func(string) (*types.Package, error)
