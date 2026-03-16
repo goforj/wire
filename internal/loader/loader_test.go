@@ -2198,37 +2198,38 @@ func TestLoadTypedPackageGraphCustomSequentialMutationsParity(t *testing.T) {
 
 func TestDiscoveryCacheInvalidatesOnGoSumResolutionChange(t *testing.T) {
 	root := t.TempDir()
+	proxyDir := t.TempDir()
 	homeDir := t.TempDir()
+
+	writeModuleProxyVersion(t, proxyDir, "example.com/extdep", "v1.0.0", map[string]string{
+		"pkg/pkg.go": "package pkg\n\nfunc Version() string { return \"v1.0.0\" }\n",
+	})
 
 	writeTestFile(t, filepath.Join(root, "go.mod"), strings.Join([]string{
 		"module example.com/app",
 		"",
 		"go 1.19",
 		"",
-		"require github.com/google/go-cmp v0.6.0",
-		"",
-	}, "\n"))
-	writeTestFile(t, filepath.Join(root, "go.sum"), strings.Join([]string{
-		"github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=",
-		"github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=",
+		"require example.com/extdep v1.0.0",
 		"",
 	}, "\n"))
 	writeTestFile(t, filepath.Join(root, "app", "wire.go"), strings.Join([]string{
 		"package app",
 		"",
-		"import \"github.com/google/go-cmp/cmp\"",
+		"import \"example.com/extdep/pkg\"",
 		"",
-		"func Init() string { return cmp.Diff(\"a\", \"b\") }",
+		"func Init() string { return pkg.Version() }",
 		"",
 	}, "\n"))
 
 	env := append(os.Environ(),
 		"HOME="+homeDir,
-		"GOPROXY=off",
-		"GONOSUMDB=*",
+		"GOPROXY=file://"+proxyDir,
+		"GOSUMDB=off",
 		"GOCACHE=/tmp/gocache",
 		"GOMODCACHE=/tmp/gomodcache",
 	)
+	runGoModTidyForTest(t, root, env)
 
 	first := loadTypedPackageGraphForTest(t, root, env, "example.com/app/app", ModeCustom)
 	if len(first.Packages) != 1 {

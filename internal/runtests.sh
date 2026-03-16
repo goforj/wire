@@ -16,6 +16,9 @@
 # https://coderwall.com/p/fkfaqq/safer-bash-scripts-with-set-euxo-pipefail
 set -euo pipefail
 
+export GOCACHE="${GOCACHE:-/tmp/gocache}"
+export GOMODCACHE="${GOMODCACHE:-/tmp/gomodcache}"
+
 if [[ $# -gt 0 ]]; then
   echo "usage: runtests.sh" 1>&2
   exit 64
@@ -34,7 +37,10 @@ fi
 
 echo
 echo "Ensuring .go files are formatted with gofmt -s..."
-mapfile -t go_files < <(find . -name '*.go' -type f | grep -v testdata)
+go_files=()
+while IFS= read -r file; do
+  go_files+=("$file")
+done < <(find . -name '*.go' -type f | grep -v testdata)
 DIFF="$(gofmt -s -d "${go_files[@]}")"
 if [ -n "$DIFF" ]; then
   echo "FAIL: please run gofmt -s and commit the result"

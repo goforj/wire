@@ -54,7 +54,17 @@ type packageMeta struct {
 	CompiledGoFiles []string
 	Imports         []string
 	ImportMap       map[string]string
+	Module          *goListModule
 	Error           *goListError
+}
+
+type goListModule struct {
+	Path    string
+	Version string
+	Main    bool
+	Dir     string
+	GoMod   string
+	Replace *goListModule
 }
 
 type goListError struct {
@@ -882,7 +892,7 @@ func (l *customTypedGraphLoader) isLocalPackage(importPath string, meta *package
 	if local, ok := l.isLocalCache[importPath]; ok {
 		return local
 	}
-	local := isWorkspacePackage(l.workspace, meta.Dir)
+	local := isLocalSourcePackage(l.workspace, meta)
 	l.isLocalCache[importPath] = local
 	return local
 }
@@ -1260,6 +1270,41 @@ func isWorkspacePackage(workspaceRoot, dir string) bool {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func isLocalSourcePackage(workspaceRoot string, meta *packageMeta) bool {
+	if meta == nil {
+		return false
+	}
+	if isWorkspacePackage(workspaceRoot, meta.Dir) {
+		return true
+	}
+	mod := localSourceModule(meta.Module)
+	if mod == nil {
+		return false
+	}
+	if mod.Main {
+		return true
+	}
+	return canonicalLoaderPath(mod.Dir) == canonicalLoaderPath(meta.Dir) || isWorkspacePackage(canonicalLoaderPath(mod.Dir), meta.Dir)
+}
+
+func localSourceModule(mod *goListModule) *goListModule {
+	if mod == nil {
+		return nil
+	}
+	if mod.Replace != nil {
+		if local := localSourceModule(mod.Replace); local != nil {
+			return local
+		}
+	}
+	if mod.Main && mod.Dir != "" {
+		return mod
+	}
+	if mod.Replace != nil && mod.Replace.Dir != "" {
+		return mod.Replace
+	}
+	return nil
 }
 
 func detectModuleRoot(start string) string {

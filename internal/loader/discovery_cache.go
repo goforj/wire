@@ -71,7 +71,7 @@ func writeDiscoveryCache(req goListRequest, meta map[string]*packageMeta) {
 func buildDiscoveryCacheEntry(req goListRequest, meta map[string]*packageMeta) (*discoveryCacheEntry, error) {
 	workspace := detectModuleRoot(req.WD)
 	entry := &discoveryCacheEntry{
-		Version:   2,
+		Version:   3,
 		WD:        canonicalLoaderPath(req.WD),
 		Tags:      req.Tags,
 		Patterns:  append([]string(nil), req.Patterns...),
@@ -92,7 +92,7 @@ func buildDiscoveryCacheEntry(req goListRequest, meta map[string]*packageMeta) (
 	}
 	locals := make([]discoveryLocalPackage, 0)
 	for _, pkg := range meta {
-		if pkg == nil || !isWorkspacePackage(workspace, pkg.Dir) {
+		if pkg == nil || !isLocalSourcePackage(workspace, pkg) {
 			continue
 		}
 		lp := discoveryLocalPackage{
@@ -116,7 +116,7 @@ func buildDiscoveryCacheEntry(req goListRequest, meta map[string]*packageMeta) (
 }
 
 func validateDiscoveryCacheEntry(entry *discoveryCacheEntry) bool {
-	if entry == nil || entry.Version != 2 {
+	if entry == nil || entry.Version != 3 {
 		return false
 	}
 	for _, fm := range entry.Global {
@@ -150,7 +150,7 @@ func discoveryCachePath(req goListRequest) (string, error) {
 		NeedDeps bool
 		Go       string
 	}{
-		Version:  2,
+		Version:  3,
 		WD:       canonicalLoaderPath(req.WD),
 		Tags:     req.Tags,
 		Patterns: append([]string(nil), req.Patterns...),
@@ -321,6 +321,9 @@ func clonePackageMetaMap(in map[string]*packageMeta) map[string]*packageMeta {
 				cp.ImportMap[mk] = mv
 			}
 		}
+		if v.Module != nil {
+			cp.Module = cloneGoListModule(v.Module)
+		}
 		if v.Error != nil {
 			errCopy := *v.Error
 			cp.Error = &errCopy
@@ -328,4 +331,15 @@ func clonePackageMetaMap(in map[string]*packageMeta) map[string]*packageMeta {
 		out[k] = &cp
 	}
 	return out
+}
+
+func cloneGoListModule(in *goListModule) *goListModule {
+	if in == nil {
+		return nil
+	}
+	cp := *in
+	if in.Replace != nil {
+		cp.Replace = cloneGoListModule(in.Replace)
+	}
+	return &cp
 }
