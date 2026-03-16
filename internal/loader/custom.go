@@ -188,22 +188,8 @@ func loadRootGraphCustom(ctx context.Context, req RootLoadRequest) (*RootLoadRes
 	}
 	pkgs := make(map[string]*packages.Package, len(meta))
 	for path, m := range meta {
-		pkgs[path] = &packages.Package{
-			ID:              m.ImportPath,
-			Name:            m.Name,
-			PkgPath:         m.ImportPath,
-			GoFiles:         append([]string(nil), metaFiles(m)...),
-			CompiledGoFiles: append([]string(nil), metaFiles(m)...),
-			ExportFile:      m.Export,
-			Imports:         make(map[string]*packages.Package),
-		}
-		if m.Error != nil && strings.TrimSpace(m.Error.Err) != "" {
-			pkgs[path].Errors = append(pkgs[path].Errors, packages.Error{
-				Pos:  "-",
-				Msg:  m.Error.Err,
-				Kind: packages.ListError,
-			})
-		}
+		pkgs[path] = packageStub(nil, m)
+		appendPackageMetaError(pkgs[path], m)
 	}
 	for path, m := range meta {
 		pkg := pkgs[path]
@@ -217,12 +203,10 @@ func loadRootGraphCustom(ctx context.Context, req RootLoadRequest) (*RootLoadRes
 			}
 		}
 	}
-	roots := make([]*packages.Package, 0, len(req.Patterns))
-	for _, m := range meta {
-		if m.DepOnly {
-			continue
-		}
-		if pkg := pkgs[m.ImportPath]; pkg != nil {
+	rootPaths := nonDepRootImportPaths(meta)
+	roots := make([]*packages.Package, 0, len(rootPaths))
+	for _, path := range rootPaths {
+		if pkg := pkgs[path]; pkg != nil {
 			roots = append(roots, pkg)
 		}
 	}
@@ -272,23 +256,7 @@ func loadTypedPackageGraphCustom(ctx context.Context, req LazyLoadRequest) (*Laz
 	if fset == nil {
 		fset = token.NewFileSet()
 	}
-	l := &customTypedGraphLoader{
-		workspace:        detectModuleRoot(req.WD),
-		ctx:              ctx,
-		env:              append([]string(nil), req.Env...),
-		fset:             fset,
-		meta:             meta,
-		targets:          map[string]struct{}{req.Package: {}},
-		parseFile:        req.ParseFile,
-		packages:         make(map[string]*packages.Package, len(meta)),
-		typesPkgs:        make(map[string]*types.Package, len(meta)),
-		importer:         importerpkg.ForCompiler(token.NewFileSet(), "gc", nil),
-		loading:          make(map[string]bool, len(meta)),
-		isLocalCache:     make(map[string]bool, len(meta)),
-		localSemanticOK:  make(map[string]bool, len(meta)),
-		artifactPrefetch: make(map[string]artifactPrefetchEntry, len(meta)),
-		stats:            typedLoadStats{discovery: discoveryDuration},
-	}
+	l := newCustomTypedGraphLoader(ctx, req.WD, req.Env, fset, meta, map[string]struct{}{req.Package: {}}, req.ParseFile, discoveryDuration)
 	prefetchStart := time.Now()
 	l.prefetchArtifacts()
 	l.stats.artifactPrefetch = time.Since(prefetchStart)
@@ -298,26 +266,7 @@ func loadTypedPackageGraphCustom(ctx context.Context, req LazyLoadRequest) (*Laz
 		return nil, err
 	}
 	l.stats.rootLoad = time.Since(rootLoadStart)
-	logDuration(ctx, "loader.custom.lazy.read_files.cumulative", l.stats.read)
-	logDuration(ctx, "loader.custom.lazy.parse_files.cumulative", l.stats.parse)
-	logDuration(ctx, "loader.custom.lazy.typecheck.cumulative", l.stats.typecheck)
-	logDuration(ctx, "loader.custom.lazy.read_files.local.cumulative", l.stats.localRead)
-	logDuration(ctx, "loader.custom.lazy.read_files.external.cumulative", l.stats.externalRead)
-	logDuration(ctx, "loader.custom.lazy.parse_files.local.cumulative", l.stats.localParse)
-	logDuration(ctx, "loader.custom.lazy.parse_files.external.cumulative", l.stats.externalParse)
-	logDuration(ctx, "loader.custom.lazy.typecheck.local.cumulative", l.stats.localTypecheck)
-	logDuration(ctx, "loader.custom.lazy.typecheck.external.cumulative", l.stats.externalTypecheck)
-	logDuration(ctx, "loader.custom.lazy.artifact_read", l.stats.artifactRead)
-	logDuration(ctx, "loader.custom.lazy.artifact_path", l.stats.artifactPath)
-	logDuration(ctx, "loader.custom.lazy.artifact_decode", l.stats.artifactDecode)
-	logDuration(ctx, "loader.custom.lazy.artifact_import_link", l.stats.artifactImportLink)
-	logDuration(ctx, "loader.custom.lazy.artifact_write", l.stats.artifactWrite)
-	logDuration(ctx, "loader.custom.lazy.artifact_prefetch.wall", l.stats.artifactPrefetch)
-	logDuration(ctx, "loader.custom.lazy.root_load.wall", l.stats.rootLoad)
-	logDuration(ctx, "loader.custom.lazy.discovery.wall", l.stats.discovery)
-	logInt(ctx, "loader.custom.lazy.artifact_hits", l.stats.artifactHits)
-	logInt(ctx, "loader.custom.lazy.artifact_misses", l.stats.artifactMisses)
-	logInt(ctx, "loader.custom.lazy.artifact_writes", l.stats.artifactWrites)
+	logTypedLoadStats(ctx, "lazy", l.stats)
 	return &LazyLoadResult{
 		Packages: []*packages.Package{root},
 		Backend:  ModeCustom,
@@ -345,42 +294,21 @@ func loadPackagesCustom(ctx context.Context, req PackageLoadRequest) (*PackageLo
 		fset = token.NewFileSet()
 	}
 	targets := make(map[string]struct{})
-	for _, m := range meta {
-		if m.DepOnly {
-			continue
-		}
-		targets[m.ImportPath] = struct{}{}
+	for _, path := range nonDepRootImportPaths(meta) {
+		targets[path] = struct{}{}
 	}
 	if len(targets) == 0 {
 		return nil, unsupportedError{reason: "no root packages from metadata"}
 	}
-	l := &customTypedGraphLoader{
-		workspace:        detectModuleRoot(req.WD),
-		ctx:              ctx,
-		env:              append([]string(nil), req.Env...),
-		fset:             fset,
-		meta:             meta,
-		targets:          targets,
-		parseFile:        req.ParseFile,
-		packages:         make(map[string]*packages.Package, len(meta)),
-		typesPkgs:        make(map[string]*types.Package, len(meta)),
-		importer:         importerpkg.ForCompiler(token.NewFileSet(), "gc", nil),
-		loading:          make(map[string]bool, len(meta)),
-		isLocalCache:     make(map[string]bool, len(meta)),
-		localSemanticOK:  make(map[string]bool, len(meta)),
-		artifactPrefetch: make(map[string]artifactPrefetchEntry, len(meta)),
-		stats:            typedLoadStats{discovery: discoveryDuration},
-	}
+	l := newCustomTypedGraphLoader(ctx, req.WD, req.Env, fset, meta, targets, req.ParseFile, discoveryDuration)
 	prefetchStart := time.Now()
 	l.prefetchArtifacts()
 	l.stats.artifactPrefetch = time.Since(prefetchStart)
 	rootLoadStart := time.Now()
-	roots := make([]*packages.Package, 0, len(targets))
-	for _, m := range meta {
-		if m.DepOnly {
-			continue
-		}
-		root, err := l.loadPackage(m.ImportPath)
+	rootPaths := nonDepRootImportPaths(meta)
+	roots := make([]*packages.Package, 0, len(rootPaths))
+	for _, path := range rootPaths {
+		root, err := l.loadPackage(path)
 		if err != nil {
 			return nil, err
 		}
@@ -388,26 +316,7 @@ func loadPackagesCustom(ctx context.Context, req PackageLoadRequest) (*PackageLo
 	}
 	l.stats.rootLoad = time.Since(rootLoadStart)
 	sort.Slice(roots, func(i, j int) bool { return roots[i].PkgPath < roots[j].PkgPath })
-	logDuration(ctx, "loader.custom.typed.read_files.cumulative", l.stats.read)
-	logDuration(ctx, "loader.custom.typed.parse_files.cumulative", l.stats.parse)
-	logDuration(ctx, "loader.custom.typed.typecheck.cumulative", l.stats.typecheck)
-	logDuration(ctx, "loader.custom.typed.read_files.local.cumulative", l.stats.localRead)
-	logDuration(ctx, "loader.custom.typed.read_files.external.cumulative", l.stats.externalRead)
-	logDuration(ctx, "loader.custom.typed.parse_files.local.cumulative", l.stats.localParse)
-	logDuration(ctx, "loader.custom.typed.parse_files.external.cumulative", l.stats.externalParse)
-	logDuration(ctx, "loader.custom.typed.typecheck.local.cumulative", l.stats.localTypecheck)
-	logDuration(ctx, "loader.custom.typed.typecheck.external.cumulative", l.stats.externalTypecheck)
-	logDuration(ctx, "loader.custom.typed.artifact_read", l.stats.artifactRead)
-	logDuration(ctx, "loader.custom.typed.artifact_path", l.stats.artifactPath)
-	logDuration(ctx, "loader.custom.typed.artifact_decode", l.stats.artifactDecode)
-	logDuration(ctx, "loader.custom.typed.artifact_import_link", l.stats.artifactImportLink)
-	logDuration(ctx, "loader.custom.typed.artifact_write", l.stats.artifactWrite)
-	logDuration(ctx, "loader.custom.typed.artifact_prefetch.wall", l.stats.artifactPrefetch)
-	logDuration(ctx, "loader.custom.typed.root_load.wall", l.stats.rootLoad)
-	logDuration(ctx, "loader.custom.typed.discovery.wall", l.stats.discovery)
-	logInt(ctx, "loader.custom.typed.artifact_hits", l.stats.artifactHits)
-	logInt(ctx, "loader.custom.typed.artifact_misses", l.stats.artifactMisses)
-	logInt(ctx, "loader.custom.typed.artifact_writes", l.stats.artifactWrites)
+	logTypedLoadStats(ctx, "typed", l.stats)
 	return &PackageLoadResult{
 		Packages: roots,
 		Backend:  ModeCustom,
@@ -424,22 +333,8 @@ func (v *customValidator) validatePackage(path string) (*packages.Package, error
 	}
 	v.loading[path] = true
 	defer delete(v.loading, path)
-	pkg := &packages.Package{
-		ID:              meta.ImportPath,
-		Name:            meta.Name,
-		PkgPath:         meta.ImportPath,
-		Fset:            v.fset,
-		GoFiles:         append([]string(nil), metaFiles(meta)...),
-		CompiledGoFiles: append([]string(nil), metaFiles(meta)...),
-		Imports:         make(map[string]*packages.Package),
-		ExportFile:      meta.Export,
-	}
-	if meta.Error != nil && strings.TrimSpace(meta.Error.Err) != "" {
-		pkg.Errors = append(pkg.Errors, packages.Error{
-			Pos:  "-",
-			Msg:  meta.Error.Err,
-			Kind: packages.ListError,
-		})
+	pkg := packageStub(v.fset, meta)
+	if appendPackageMetaError(pkg, meta) {
 		return pkg, nil
 	}
 	files, errs := v.parseFiles(metaFiles(meta))
@@ -563,16 +458,7 @@ func (l *customTypedGraphLoader) loadPackage(path string) (*packages.Package, er
 	}
 
 	if pkg == nil {
-		pkg = &packages.Package{
-			ID:              meta.ImportPath,
-			Name:            meta.Name,
-			PkgPath:         meta.ImportPath,
-			Fset:            l.fset,
-			GoFiles:         append([]string(nil), metaFiles(meta)...),
-			CompiledGoFiles: append([]string(nil), metaFiles(meta)...),
-			Imports:         make(map[string]*packages.Package),
-			ExportFile:      meta.Export,
-		}
+		pkg = packageStub(l.fset, meta)
 		l.packages[path] = pkg
 	}
 	useArtifact := l.shouldUseArtifact(path, meta, isTarget, isLocal)
@@ -600,13 +486,7 @@ func (l *customTypedGraphLoader) loadPackage(path string) (*packages.Package, er
 	files, parseErrs := l.parseFiles(metaFiles(meta), isLocal)
 	pkg.Errors = append(pkg.Errors, parseErrs...)
 	if len(files) == 0 {
-		if meta.Error != nil && strings.TrimSpace(meta.Error.Err) != "" {
-			pkg.Errors = append(pkg.Errors, packages.Error{
-				Pos:  "-",
-				Msg:  meta.Error.Err,
-				Kind: packages.ListError,
-			})
-		}
+		appendPackageMetaError(pkg, meta)
 		return pkg, nil
 	}
 
@@ -1358,7 +1238,27 @@ func envValue(env []string, key string) string {
 	return ""
 }
 
-func touchedPackageStub(fset *token.FileSet, meta *packageMeta) *packages.Package {
+func newCustomTypedGraphLoader(ctx context.Context, wd string, env []string, fset *token.FileSet, meta map[string]*packageMeta, targets map[string]struct{}, parseFile ParseFileFunc, discoveryDuration time.Duration) *customTypedGraphLoader {
+	return &customTypedGraphLoader{
+		workspace:        detectModuleRoot(wd),
+		ctx:              ctx,
+		env:              append([]string(nil), env...),
+		fset:             fset,
+		meta:             meta,
+		targets:          targets,
+		parseFile:        parseFile,
+		packages:         make(map[string]*packages.Package, len(meta)),
+		typesPkgs:        make(map[string]*types.Package, len(meta)),
+		importer:         importerpkg.ForCompiler(token.NewFileSet(), "gc", nil),
+		loading:          make(map[string]bool, len(meta)),
+		isLocalCache:     make(map[string]bool, len(meta)),
+		localSemanticOK:  make(map[string]bool, len(meta)),
+		artifactPrefetch: make(map[string]artifactPrefetchEntry, len(meta)),
+		stats:            typedLoadStats{discovery: discoveryDuration},
+	}
+}
+
+func packageStub(fset *token.FileSet, meta *packageMeta) *packages.Package {
 	if meta == nil {
 		return nil
 	}
@@ -1372,6 +1272,58 @@ func touchedPackageStub(fset *token.FileSet, meta *packageMeta) *packages.Packag
 		Imports:         make(map[string]*packages.Package),
 		ExportFile:      meta.Export,
 	}
+}
+
+func appendPackageMetaError(pkg *packages.Package, meta *packageMeta) bool {
+	if pkg == nil || meta == nil || meta.Error == nil || strings.TrimSpace(meta.Error.Err) == "" {
+		return false
+	}
+	pkg.Errors = append(pkg.Errors, packages.Error{
+		Pos:  "-",
+		Msg:  meta.Error.Err,
+		Kind: packages.ListError,
+	})
+	return true
+}
+
+func nonDepRootImportPaths(meta map[string]*packageMeta) []string {
+	paths := make([]string, 0, len(meta))
+	for _, m := range meta {
+		if m == nil || m.DepOnly {
+			continue
+		}
+		paths = append(paths, m.ImportPath)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func logTypedLoadStats(ctx context.Context, mode string, stats typedLoadStats) {
+	prefix := "loader.custom." + mode
+	logDuration(ctx, prefix+".read_files.cumulative", stats.read)
+	logDuration(ctx, prefix+".parse_files.cumulative", stats.parse)
+	logDuration(ctx, prefix+".typecheck.cumulative", stats.typecheck)
+	logDuration(ctx, prefix+".read_files.local.cumulative", stats.localRead)
+	logDuration(ctx, prefix+".read_files.external.cumulative", stats.externalRead)
+	logDuration(ctx, prefix+".parse_files.local.cumulative", stats.localParse)
+	logDuration(ctx, prefix+".parse_files.external.cumulative", stats.externalParse)
+	logDuration(ctx, prefix+".typecheck.local.cumulative", stats.localTypecheck)
+	logDuration(ctx, prefix+".typecheck.external.cumulative", stats.externalTypecheck)
+	logDuration(ctx, prefix+".artifact_read", stats.artifactRead)
+	logDuration(ctx, prefix+".artifact_path", stats.artifactPath)
+	logDuration(ctx, prefix+".artifact_decode", stats.artifactDecode)
+	logDuration(ctx, prefix+".artifact_import_link", stats.artifactImportLink)
+	logDuration(ctx, prefix+".artifact_write", stats.artifactWrite)
+	logDuration(ctx, prefix+".artifact_prefetch.wall", stats.artifactPrefetch)
+	logDuration(ctx, prefix+".root_load.wall", stats.rootLoad)
+	logDuration(ctx, prefix+".discovery.wall", stats.discovery)
+	logInt(ctx, prefix+".artifact_hits", stats.artifactHits)
+	logInt(ctx, prefix+".artifact_misses", stats.artifactMisses)
+	logInt(ctx, prefix+".artifact_writes", stats.artifactWrites)
+}
+
+func touchedPackageStub(fset *token.FileSet, meta *packageMeta) *packages.Package {
+	return packageStub(fset, meta)
 }
 
 func metadataMatchesFingerprint(pkgPath string, meta map[string]*packageMeta, local []LocalPackageFingerprint) bool {

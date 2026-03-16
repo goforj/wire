@@ -19,9 +19,7 @@ import (
 	"flag"
 	"log"
 	"os"
-	"time"
 
-	"github.com/goforj/wire/internal/wire"
 	"github.com/google/subcommands"
 )
 
@@ -66,7 +64,6 @@ func (cmd *genCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interfa
 		return subcommands.ExitFailure
 	}
 	defer stop()
-	totalStart := time.Now()
 	ctx = withTiming(ctx, cmd.profile.timings)
 
 	wd, err := os.Getwd()
@@ -83,46 +80,8 @@ func (cmd *genCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interfa
 	opts.PrefixOutputFile = cmd.prefixFileName
 	opts.Tags = cmd.tags
 
-	genStart := time.Now()
-	outs, errs := wire.Generate(ctx, wd, os.Environ(), packages(f), opts)
-	logTiming(cmd.profile.timings, "wire.Generate", genStart)
-	if len(errs) > 0 {
-		logErrors(errs)
-		log.Println("generate failed")
+	if !runGenerateCommand(ctx, wd, os.Environ(), packages(f), opts, cmd.profile.timings) {
 		return subcommands.ExitFailure
 	}
-	if len(outs) == 0 {
-		logTiming(cmd.profile.timings, "total", totalStart)
-		return subcommands.ExitSuccess
-	}
-	success := true
-	writeStart := time.Now()
-	for _, out := range outs {
-		if len(out.Errs) > 0 {
-			logErrors(out.Errs)
-			log.Printf("%s: generate failed\n", out.PkgPath)
-			success = false
-		}
-		if len(out.Content) == 0 {
-			// No Wire output. Maybe errors, maybe no Wire directives.
-			continue
-		}
-		if wrote, err := out.CommitWithStatus(); err == nil {
-			if wrote {
-				logSuccessf("%s: wrote %s (%s)", out.PkgPath, out.OutputPath, formatDuration(time.Since(totalStart)))
-			} else {
-				logSuccessf("%s: unchanged %s (%s)", out.PkgPath, out.OutputPath, formatDuration(time.Since(totalStart)))
-			}
-		} else {
-			log.Printf("%s: failed to write %s: %v\n", out.PkgPath, out.OutputPath, err)
-			success = false
-		}
-	}
-	if !success {
-		log.Println("at least one generate failure")
-		return subcommands.ExitFailure
-	}
-	logTiming(cmd.profile.timings, "writes", writeStart)
-	logTiming(cmd.profile.timings, "total", totalStart)
 	return subcommands.ExitSuccess
 }
