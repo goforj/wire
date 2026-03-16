@@ -865,18 +865,7 @@ func (v *customValidator) parseFiles(names []string) ([]*ast.File, []packages.Er
 		}
 		f, err := parser.ParseFile(v.fset, name, src, parser.AllErrors|parser.ParseComments)
 		if err != nil {
-			switch typed := err.(type) {
-			case scanner.ErrorList:
-				for _, parseErr := range typed {
-					errs = append(errs, packages.Error{
-						Pos:  parseErr.Pos.String(),
-						Msg:  parseErr.Msg,
-						Kind: packages.ParseError,
-					})
-				}
-			default:
-				errs = append(errs, packages.Error{Pos: name + ":1", Msg: err.Error(), Kind: packages.ParseError})
-			}
+			errs = appendParseErrors(errs, name, err)
 		}
 		if f != nil {
 			files = append(files, f)
@@ -920,18 +909,7 @@ func (l *customTypedGraphLoader) parseFiles(names []string, isLocal bool) ([]*as
 			l.stats.externalParse += parseDuration
 		}
 		if err != nil {
-			switch typed := err.(type) {
-			case scanner.ErrorList:
-				for _, parseErr := range typed {
-					errs = append(errs, packages.Error{
-						Pos:  parseErr.Pos.String(),
-						Msg:  parseErr.Msg,
-						Kind: packages.ParseError,
-					})
-				}
-			default:
-				errs = append(errs, packages.Error{Pos: name + ":1", Msg: err.Error(), Kind: packages.ParseError})
-			}
+			errs = appendParseErrors(errs, name, err)
 		}
 		if f != nil {
 			files = append(files, f)
@@ -1273,6 +1251,22 @@ func newTypesInfo() *types.Info {
 		Scopes:     make(map[ast.Node]*types.Scope),
 		Selections: make(map[*ast.SelectorExpr]*types.Selection),
 	}
+}
+
+func appendParseErrors(errs []packages.Error, name string, err error) []packages.Error {
+	switch typed := err.(type) {
+	case scanner.ErrorList:
+		for _, parseErr := range typed {
+			errs = append(errs, packages.Error{
+				Pos:  parseErr.Pos.String(),
+				Msg:  parseErr.Msg,
+				Kind: packages.ParseError,
+			})
+		}
+	default:
+		errs = append(errs, packages.Error{Pos: name + ":1", Msg: err.Error(), Kind: packages.ParseError})
+	}
+	return errs
 }
 
 func nonDepRootImportPaths(meta map[string]*packageMeta) []string {
