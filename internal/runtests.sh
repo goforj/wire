@@ -16,8 +16,13 @@
 # https://coderwall.com/p/fkfaqq/safer-bash-scripts-with-set-euxo-pipefail
 set -euo pipefail
 
-export GOCACHE="${GOCACHE:-/tmp/gocache}"
-export GOMODCACHE="${GOMODCACHE:-/tmp/gomodcache}"
+tmp_root="${TMPDIR:-${RUNNER_TEMP:-}}"
+if [[ -z "${tmp_root}" ]]; then
+  tmp_root="$(mktemp -d)"
+fi
+
+export GOCACHE="${GOCACHE:-${tmp_root}/gocache}"
+export GOMODCACHE="${GOMODCACHE:-${tmp_root}/gomodcache}"
 
 if [[ $# -gt 0 ]]; then
   echo "usage: runtests.sh" 1>&2

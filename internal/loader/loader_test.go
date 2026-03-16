@@ -2200,6 +2200,8 @@ func TestDiscoveryCacheInvalidatesOnGoSumResolutionChange(t *testing.T) {
 	root := t.TempDir()
 	proxyDir := t.TempDir()
 	homeDir := t.TempDir()
+	goCacheDir := tempCacheDirForTest(t, "wire-gocache-")
+	goModCacheDir := tempCacheDirForTest(t, "wire-gomodcache-")
 
 	writeModuleProxyVersion(t, proxyDir, "example.com/extdep", "v1.0.0", map[string]string{
 		"pkg/pkg.go": "package pkg\n\nfunc Version() string { return \"v1.0.0\" }\n",
@@ -2226,8 +2228,8 @@ func TestDiscoveryCacheInvalidatesOnGoSumResolutionChange(t *testing.T) {
 		"HOME="+homeDir,
 		"GOPROXY=file://"+proxyDir,
 		"GOSUMDB=off",
-		"GOCACHE=/tmp/gocache",
-		"GOMODCACHE=/tmp/gomodcache",
+		"GOCACHE="+goCacheDir,
+		"GOMODCACHE="+goModCacheDir,
 	)
 	runGoModTidyForTest(t, root, env)
 
@@ -2252,6 +2254,8 @@ func TestLoadTypedPackageGraphCustomExternalVersionChangeBustsCache(t *testing.T
 	proxyDir := t.TempDir()
 	artifactDir := t.TempDir()
 	homeDir := t.TempDir()
+	goCacheDir := tempCacheDirForTest(t, "wire-gocache-")
+	goModCacheDir := tempCacheDirForTest(t, "wire-gomodcache-")
 
 	writeModuleProxyVersion(t, proxyDir, "example.com/extdep", "v1.0.0", map[string]string{
 		"pkg/pkg.go": "package pkg\n\nfunc Version() string { return \"v1.0.0\" }\n",
@@ -2281,8 +2285,8 @@ func TestLoadTypedPackageGraphCustomExternalVersionChangeBustsCache(t *testing.T
 		"HOME="+homeDir,
 		"GOPROXY=file://"+proxyDir,
 		"GOSUMDB=off",
-		"GOCACHE=/tmp/gocache",
-		"GOMODCACHE=/tmp/gomodcache",
+		"GOCACHE="+goCacheDir,
+		"GOMODCACHE="+goModCacheDir,
 		loaderArtifactEnv+"=1",
 		loaderArtifactDirEnv+"="+artifactDir,
 	)
@@ -2386,6 +2390,8 @@ func TestRunGoListIncludesExportDataForReplacedModule(t *testing.T) {
 	root := t.TempDir()
 	depRoot := filepath.Join(root, "depmod")
 	appRoot := filepath.Join(root, "appmod")
+	goCacheDir := tempCacheDirForTest(t, "wire-gocache-")
+	goModCacheDir := tempCacheDirForTest(t, "wire-gomodcache-")
 
 	writeTestFile(t, filepath.Join(depRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
 	writeTestFile(t, filepath.Join(depRoot, "dep.go"), "package dep\n\nfunc New() string { return \"ok\" }\n")
@@ -2404,7 +2410,7 @@ func TestRunGoListIncludesExportDataForReplacedModule(t *testing.T) {
 
 	meta, err := runGoList(context.Background(), goListRequest{
 		WD:       appRoot,
-		Env:      append(os.Environ(), "GOCACHE=/tmp/gocache", "GOMODCACHE=/tmp/gomodcache"),
+		Env:      append(os.Environ(), "GOCACHE="+goCacheDir, "GOMODCACHE="+goModCacheDir),
 		Patterns: []string{"example.com/app/app"},
 		NeedDeps: true,
 	})
@@ -2426,6 +2432,8 @@ func TestLoadTypedPackageGraphCustomReplaceTargetWithExportDataWarmParity(t *tes
 	appRoot := filepath.Join(root, "appmod")
 	artifactDir := t.TempDir()
 	homeDir := t.TempDir()
+	goCacheDir := tempCacheDirForTest(t, "wire-gocache-")
+	goModCacheDir := tempCacheDirForTest(t, "wire-gomodcache-")
 
 	writeTestFile(t, filepath.Join(depRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
 	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
@@ -2456,8 +2464,8 @@ func TestLoadTypedPackageGraphCustomReplaceTargetWithExportDataWarmParity(t *tes
 
 	env := append(os.Environ(),
 		"HOME="+homeDir,
-		"GOCACHE=/tmp/gocache",
-		"GOMODCACHE=/tmp/gomodcache",
+		"GOCACHE="+goCacheDir,
+		"GOMODCACHE="+goModCacheDir,
 		loaderArtifactEnv+"=1",
 		loaderArtifactDirEnv+"="+artifactDir,
 	)
@@ -2517,6 +2525,8 @@ func TestLoadTypedPackageGraphCustomReplaceTargetWithoutExportDataWarmParity(t *
 	depRoot := filepath.Join(root, "depmod")
 	appRoot := filepath.Join(root, "appmod")
 	homeDir := t.TempDir()
+	goCacheDir := tempCacheDirForTest(t, "wire-gocache-")
+	goModCacheDir := tempCacheDirForTest(t, "wire-gomodcache-")
 
 	writeTestFile(t, filepath.Join(depRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
 	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
@@ -2549,8 +2559,8 @@ func TestLoadTypedPackageGraphCustomReplaceTargetWithoutExportDataWarmParity(t *
 
 	env := append(os.Environ(),
 		"HOME="+homeDir,
-		"GOCACHE=/tmp/gocache",
-		"GOMODCACHE=/tmp/gomodcache",
+		"GOCACHE="+goCacheDir,
+		"GOMODCACHE="+goModCacheDir,
 	)
 
 	meta, err := runGoList(context.Background(), goListRequest{
@@ -3118,6 +3128,29 @@ func appendLineIfMissing(t *testing.T, path string, line string) {
 	}
 	content += line + "\n"
 	writeTestFile(t, path, content)
+}
+
+func tempCacheDirForTest(t *testing.T, pattern string) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", pattern)
+	if err != nil {
+		t.Fatalf("MkdirTemp(%q) error = %v", pattern, err)
+	}
+	t.Cleanup(func() {
+		_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			if info.IsDir() {
+				_ = os.Chmod(path, 0o755)
+				return nil
+			}
+			_ = os.Chmod(path, 0o644)
+			return nil
+		})
+		_ = os.RemoveAll(dir)
+	})
+	return dir
 }
 
 type importerFuncForTest func(string) (*types.Package, error)
