@@ -72,6 +72,29 @@ func loaderArtifactKey(meta *packageMeta, isLocal bool) (string, error) {
 	if !isLocal {
 		sum.Write([]byte(meta.Export))
 		sum.Write([]byte{'\n'})
+		if meta.Export != "" {
+			info, err := os.Stat(meta.Export)
+			if err != nil {
+				return "", err
+			}
+			sum.Write([]byte(strconv.FormatInt(info.Size(), 10)))
+			sum.Write([]byte{'\n'})
+			sum.Write([]byte(strconv.FormatInt(info.ModTime().UnixNano(), 10)))
+			sum.Write([]byte{'\n'})
+		} else {
+			for _, name := range metaFiles(meta) {
+				info, err := os.Stat(name)
+				if err != nil {
+					return "", err
+				}
+				sum.Write([]byte(name))
+				sum.Write([]byte{'\n'})
+				sum.Write([]byte(strconv.FormatInt(info.Size(), 10)))
+				sum.Write([]byte{'\n'})
+				sum.Write([]byte(strconv.FormatInt(info.ModTime().UnixNano(), 10)))
+				sum.Write([]byte{'\n'})
+			}
+		}
 		if meta.Error != nil {
 			sum.Write([]byte(meta.Error.Err))
 			sum.Write([]byte{'\n'})

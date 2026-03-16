@@ -702,6 +702,166 @@ func TestLoadTypedPackageGraphCustomExternalArtifactCacheReportsHits(t *testing.
 	}
 }
 
+func TestLoadTypedPackageGraphCustomArtifactCacheReplacedModuleSourceChange(t *testing.T) {
+	root := t.TempDir()
+	depRoot := filepath.Join(root, "depmod")
+	appRoot := filepath.Join(root, "appmod")
+	artifactDir := t.TempDir()
+	homeDir := t.TempDir()
+
+	writeTestFile(t, filepath.Join(depRoot, "go.mod"), "module example.com/dep\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), "package dep\n\nfunc New() string { return \"ok\" }\n")
+
+	writeTestFile(t, filepath.Join(appRoot, "go.mod"), strings.Join([]string{
+		"module example.com/app",
+		"",
+		"go 1.19",
+		"",
+		"require example.com/dep v0.0.0",
+		"",
+		"replace example.com/dep => " + depRoot,
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "app.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Use() string {",
+		"\treturn dep.New()",
+		"}",
+		"",
+	}, "\n"))
+
+	env := append(os.Environ(),
+		"HOME="+homeDir,
+		loaderArtifactEnv+"=1",
+		loaderArtifactDirEnv+"="+artifactDir,
+	)
+
+	load := func(mode Mode) (*LazyLoadResult, error) {
+		l := New()
+		return l.LoadTypedPackageGraph(context.Background(), LazyLoadRequest{
+			WD:         appRoot,
+			Env:        env,
+			Package:    "example.com/app/app",
+			Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedSyntax | packages.NeedExportFile,
+			LoaderMode: mode,
+			Fset:       token.NewFileSet(),
+			ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+				return parser.ParseFile(fset, filename, src, parser.ParseComments|parser.SkipObjectResolution)
+			},
+		})
+	}
+
+	first, err := load(ModeCustom)
+	if err != nil {
+		t.Fatalf("first LoadTypedPackageGraph(custom) error = %v", err)
+	}
+	if len(first.Packages) != 1 || len(first.Packages[0].Errors) != 0 {
+		t.Fatalf("first custom load returned errors: %+v", first.Packages)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, filepath.Join(depRoot, "dep.go"), strings.Join([]string{
+		"package dep",
+		"",
+		"type Logger interface { Log(string) }",
+		"",
+		"type NoopLogger struct{}",
+		"",
+		"func (NoopLogger) Log(string) {}",
+		"",
+		"func New(Logger) string { return \"ok\" }",
+		"",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(appRoot, "app", "app.go"), strings.Join([]string{
+		"package app",
+		"",
+		"import \"example.com/dep\"",
+		"",
+		"func Use() string {",
+		"\tvar l dep.Logger = dep.NoopLogger{}",
+		"\treturn dep.New(l)",
+		"}",
+		"",
+	}, "\n"))
+
+	custom, err := load(ModeCustom)
+	if err != nil {
+		t.Fatalf("second LoadTypedPackageGraph(custom) error = %v", err)
+	}
+	if len(custom.Packages) != 1 {
+		t.Fatalf("second custom packages len = %d, want 1", len(custom.Packages))
+	}
+	if got := comparableErrors(custom.Packages[0].Errors); len(got) != 0 {
+		t.Fatalf("second custom load returned errors: %v", got)
+	}
+
+	fallback, err := load(ModeFallback)
+	if err != nil {
+		t.Fatalf("second LoadTypedPackageGraph(fallback) error = %v", err)
+	}
+	compareRootPackagesOnly(t, custom.Packages, fallback.Packages, true)
+}
+
+func TestLoaderArtifactKeyExternalChangesWhenExportFileChanges(t *testing.T) {
+	exportPath := filepath.Join(t.TempDir(), "dep.a")
+	writeTestFile(t, exportPath, "first export payload")
+
+	meta := &packageMeta{
+		ImportPath: "example.com/dep",
+		Name:       "dep",
+		Export:     exportPath,
+	}
+
+	first, err := loaderArtifactKey(meta, false)
+	if err != nil {
+		t.Fatalf("loaderArtifactKey(first) error = %v", err)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, exportPath, "second export payload with different contents")
+
+	second, err := loaderArtifactKey(meta, false)
+	if err != nil {
+		t.Fatalf("loaderArtifactKey(second) error = %v", err)
+	}
+
+	if first == second {
+		t.Fatalf("loaderArtifactKey did not change after export file update: %q", first)
+	}
+}
+
+func TestLoaderArtifactKeyExternalWithoutExportChangesWhenSourceChanges(t *testing.T) {
+	sourcePath := filepath.Join(t.TempDir(), "dep.go")
+	writeTestFile(t, sourcePath, "package dep\n\nconst Name = \"first\"\n")
+
+	meta := &packageMeta{
+		ImportPath:      "example.com/dep",
+		Name:            "dep",
+		GoFiles:         []string{sourcePath},
+		CompiledGoFiles: []string{sourcePath},
+	}
+
+	first, err := loaderArtifactKey(meta, false)
+	if err != nil {
+		t.Fatalf("loaderArtifactKey(first) error = %v", err)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	writeTestFile(t, sourcePath, "package dep\n\nconst Name = \"second\"\n")
+
+	second, err := loaderArtifactKey(meta, false)
+	if err != nil {
+		t.Fatalf("loaderArtifactKey(second) error = %v", err)
+	}
+
+	if first == second {
+		t.Fatalf("loaderArtifactKey did not change after external source update without export data: %q", first)
+	}
+}
+
 func TestLoadTypedPackageGraphCustomExternalArtifactCacheRealAppParity(t *testing.T) {
 	root := os.Getenv("WIRE_REAL_APP_ROOT")
 	if root == "" {
