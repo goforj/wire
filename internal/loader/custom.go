@@ -199,10 +199,7 @@ func loadRootGraphCustom(ctx context.Context, req RootLoadRequest) (*RootLoadRes
 	for path, m := range meta {
 		pkg := pkgs[path]
 		for _, imp := range m.Imports {
-			target := imp
-			if mapped := m.ImportMap[imp]; mapped != "" {
-				target = mapped
-			}
+			target := resolvedImportTarget(m, imp)
 			if dep := pkgs[target]; dep != nil {
 				pkg.Imports[imp] = dep
 			}
@@ -362,10 +359,7 @@ func (v *customValidator) validatePackage(path string) (*packages.Package, error
 		if importPath == "unsafe" {
 			return types.Unsafe, nil
 		}
-		target := importPath
-		if mapped := meta.ImportMap[importPath]; mapped != "" {
-			target = mapped
-		}
+		target := resolvedImportTarget(meta, importPath)
 		if _, ok := v.touched[target]; ok {
 			if typed := v.packages[target]; typed != nil && typed.Complete() {
 				if depMeta := v.meta[target]; depMeta != nil {
@@ -859,10 +853,7 @@ func (v *customValidator) loadDependencyFromSource(path string) (*types.Package,
 			if importPath == "unsafe" {
 				return types.Unsafe, nil
 			}
-			target := importPath
-			if mapped := meta.ImportMap[importPath]; mapped != "" {
-				target = mapped
-			}
+			target := resolvedImportTarget(meta, importPath)
 			if _, ok := v.touched[target]; ok {
 				checked, err := v.validatePackage(target)
 				if err != nil {
@@ -1023,10 +1014,7 @@ func (v *customValidator) validateDeclaredImports(meta *packageMeta, files []*as
 			if path == "" {
 				continue
 			}
-			target := path
-			if mapped := meta.ImportMap[path]; mapped != "" {
-				target = mapped
-			}
+			target := resolvedImportTarget(meta, path)
 			name := importName(spec)
 			if name != "_" && name != "." {
 				if _, ok := used[name]; !ok {
