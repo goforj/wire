@@ -347,14 +347,7 @@ func (v *customValidator) validatePackage(path string) (*packages.Package, error
 
 	tpkg := types.NewPackage(meta.ImportPath, meta.Name)
 	v.packages[meta.ImportPath] = tpkg
-	info := &types.Info{
-		Types:      make(map[ast.Expr]types.TypeAndValue),
-		Defs:       make(map[*ast.Ident]types.Object),
-		Uses:       make(map[*ast.Ident]types.Object),
-		Implicits:  make(map[ast.Node]types.Object),
-		Scopes:     make(map[ast.Node]*types.Scope),
-		Selections: make(map[*ast.SelectorExpr]*types.Selection),
-	}
+	info := newTypesInfo()
 	importer := importerFunc(func(importPath string) (*types.Package, error) {
 		if importPath == "unsafe" {
 			return types.Unsafe, nil
@@ -489,14 +482,7 @@ func (l *customTypedGraphLoader) loadPackage(path string) (*packages.Package, er
 	needFullState := isTarget || isLocal
 	var info *types.Info
 	if needFullState {
-		info = &types.Info{
-			Types:      make(map[ast.Expr]types.TypeAndValue),
-			Defs:       make(map[*ast.Ident]types.Object),
-			Uses:       make(map[*ast.Ident]types.Object),
-			Implicits:  make(map[ast.Node]types.Object),
-			Scopes:     make(map[ast.Node]*types.Scope),
-			Selections: make(map[*ast.SelectorExpr]*types.Selection),
-		}
+		info = newTypesInfo()
 	}
 	var typeErrors []packages.Error
 	cfg := &types.Config{
@@ -840,14 +826,7 @@ func (v *customValidator) loadDependencyFromSource(path string) (*types.Package,
 	if len(errs) > 0 {
 		return nil, unsupportedError{reason: "dependency parse error"}
 	}
-	info := &types.Info{
-		Types:      make(map[ast.Expr]types.TypeAndValue),
-		Defs:       make(map[*ast.Ident]types.Object),
-		Uses:       make(map[*ast.Ident]types.Object),
-		Implicits:  make(map[ast.Node]types.Object),
-		Scopes:     make(map[ast.Node]*types.Scope),
-		Selections: make(map[*ast.SelectorExpr]*types.Selection),
-	}
+	info := newTypesInfo()
 	cfg := &types.Config{
 		Importer: importerFunc(func(importPath string) (*types.Package, error) {
 			if importPath == "unsafe" {
@@ -1283,6 +1262,17 @@ func resolvedImportTarget(meta *packageMeta, importPath string) string {
 		return mapped
 	}
 	return importPath
+}
+
+func newTypesInfo() *types.Info {
+	return &types.Info{
+		Types:      make(map[ast.Expr]types.TypeAndValue),
+		Defs:       make(map[*ast.Ident]types.Object),
+		Uses:       make(map[*ast.Ident]types.Object),
+		Implicits:  make(map[ast.Node]types.Object),
+		Scopes:     make(map[ast.Node]*types.Scope),
+		Selections: make(map[*ast.SelectorExpr]*types.Selection),
+	}
 }
 
 func nonDepRootImportPaths(meta map[string]*packageMeta) []string {
