@@ -12,10 +12,12 @@ usage() {
   cat <<'EOF'
 Usage:
   scripts/import-benchmarks.sh table
+  scripts/import-benchmarks.sh scenarios
   scripts/import-benchmarks.sh breakdown
 
 Commands:
   table      Print the 10/100/1000 import stock-vs-current benchmark table.
+  scenarios  Print the stock-vs-current change-type scenario table.
   breakdown  Print a focused 1000-import cold/unchanged breakdown.
 EOF
 }
@@ -23,6 +25,9 @@ EOF
 case "${1:-}" in
   table)
     WIRE_IMPORT_BENCH_TABLE=1 go test ./internal/wire -run TestPrintImportScaleBenchmarkTable -count=1 -v
+    ;;
+  scenarios)
+    WIRE_IMPORT_BENCH_SCENARIOS=1 go test ./internal/wire -run TestPrintImportScenarioBenchmarkTable -count=1 -v
     ;;
   breakdown)
     WIRE_IMPORT_BENCH_BREAKDOWN=1 go test ./internal/wire -run TestPrintImportScaleBenchmarkBreakdown -count=1 -v
