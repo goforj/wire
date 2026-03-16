@@ -470,16 +470,8 @@ func (l *customTypedGraphLoader) loadPackage(path string) (*packages.Package, er
 	if artifactPolicy.read {
 		if typed, ok := l.readArtifact(path, meta, isLocal); ok {
 			linkStart := time.Now()
-			for _, imp := range meta.Imports {
-				target := imp
-				if mapped := meta.ImportMap[imp]; mapped != "" {
-					target = mapped
-				}
-				dep, err := l.loadPackage(target)
-				if err != nil {
-					return nil, err
-				}
-				pkg.Imports[imp] = dep
+			if err := l.linkPackageImports(pkg, meta); err != nil {
+				return nil, err
 			}
 			l.stats.artifactImportLink += time.Since(linkStart)
 			pkg.Types = typed
@@ -520,10 +512,7 @@ func (l *customTypedGraphLoader) loadPackage(path string) (*packages.Package, er
 			if importPath == "unsafe" {
 				return types.Unsafe, nil
 			}
-			target := importPath
-			if mapped := meta.ImportMap[importPath]; mapped != "" {
-				target = mapped
-			}
+			target := resolvedImportTarget(meta, importPath)
 			dep, err := l.loadPackage(target)
 			if err != nil {
 				return nil, err
@@ -597,6 +586,17 @@ func (l *customTypedGraphLoader) artifactPolicy(meta *packageMeta, isTarget, isL
 	}
 	policy.read = l.localSemanticArtifactSupported(meta)
 	return policy
+}
+
+func (l *customTypedGraphLoader) linkPackageImports(pkg *packages.Package, meta *packageMeta) error {
+	for _, imp := range meta.Imports {
+		dep, err := l.loadPackage(resolvedImportTarget(meta, imp))
+		if err != nil {
+			return err
+		}
+		pkg.Imports[imp] = dep
+	}
+	return nil
 }
 
 func (l *customTypedGraphLoader) checkFiles(path string, checker *types.Checker, files []*ast.File) (err error) {
@@ -1285,6 +1285,16 @@ func appendPackageMetaError(pkg *packages.Package, meta *packageMeta) bool {
 		Kind: packages.ListError,
 	})
 	return true
+}
+
+func resolvedImportTarget(meta *packageMeta, importPath string) string {
+	if meta == nil {
+		return importPath
+	}
+	if mapped := meta.ImportMap[importPath]; mapped != "" {
+		return mapped
+	}
+	return importPath
 }
 
 func nonDepRootImportPaths(meta map[string]*packageMeta) []string {
