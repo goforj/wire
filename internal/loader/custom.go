@@ -863,7 +863,7 @@ func (v *customValidator) parseFiles(names []string) ([]*ast.File, []packages.Er
 			errs = append(errs, packages.Error{Pos: name + ":1", Msg: err.Error(), Kind: packages.ParseError})
 			continue
 		}
-		f, err := parser.ParseFile(v.fset, name, src, parser.AllErrors|parser.ParseComments)
+		f, err := parseGoSourceFile(v.fset, nil, name, src)
 		if err != nil {
 			errs = appendParseErrors(errs, name, err)
 		}
@@ -896,11 +896,7 @@ func (l *customTypedGraphLoader) parseFiles(names []string, isLocal bool) ([]*as
 		}
 		var f *ast.File
 		parseStart := time.Now()
-		if l.parseFile != nil {
-			f, err = l.parseFile(l.fset, name, src)
-		} else {
-			f, err = parser.ParseFile(l.fset, name, src, parser.AllErrors|parser.ParseComments)
-		}
+		f, err = parseGoSourceFile(l.fset, l.parseFile, name, src)
 		parseDuration := time.Since(parseStart)
 		l.stats.parse += parseDuration
 		if isLocal {
@@ -1251,6 +1247,13 @@ func newTypesInfo() *types.Info {
 		Scopes:     make(map[ast.Node]*types.Scope),
 		Selections: make(map[*ast.SelectorExpr]*types.Selection),
 	}
+}
+
+func parseGoSourceFile(fset *token.FileSet, parseFile ParseFileFunc, name string, src []byte) (*ast.File, error) {
+	if parseFile != nil {
+		return parseFile(fset, name, src)
+	}
+	return parser.ParseFile(fset, name, src, parser.AllErrors|parser.ParseComments)
 }
 
 func appendParseErrors(errs []packages.Error, name string, err error) []packages.Error {
