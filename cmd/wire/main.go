@@ -36,11 +36,11 @@ import (
 )
 
 const (
-	ansiRed    = "\033[1;31m"
-	ansiGreen  = "\033[1;32m"
-	ansiReset  = "\033[0m"
-	successSig = "✓ "
-	errorSig   = "x "
+	ansiRed             = "\033[1;31m"
+	ansiGreen           = "\033[1;32m"
+	ansiReset           = "\033[0m"
+	successSig          = "✓ "
+	errorSig            = "x "
 	maxLoggedErrorLines = 5
 )
 

@@ -26,10 +26,10 @@ const (
 )
 
 type importBenchRow struct {
-	imports      int
-	stockCold    time.Duration
-	currentCold  time.Duration
-	currentWarm  time.Duration
+	imports     int
+	stockCold   time.Duration
+	currentCold time.Duration
+	currentWarm time.Duration
 }
 
 type importBenchScenarioRow struct {
@@ -520,7 +520,7 @@ func appShapeGoMod(modulePath, wireModulePath, wireReplaceDir string, external b
 	}
 	return fmt.Sprintf(`module %s
 
-go 1.26
+go 1.19
 
 require (
 	%s v0.0.0%s
@@ -1146,7 +1146,7 @@ func benchEnv(home, goCache string) []string {
 func importBenchGoMod(wireModulePath, wireReplaceDir string) string {
 	return fmt.Sprintf(`module example.com/importbench
 
-go 1.26
+go 1.19
 
 require %s v0.0.0
 
@@ -1351,6 +1351,11 @@ func TestImportBenchUsesStockArchive(t *testing.T) {
 	repoRoot, err := importBenchRepoRoot()
 	if err != nil {
 		t.Fatal(err)
+	}
+	check := exec.Command("git", "cat-file", "-e", stockWireCommit+"^{commit}")
+	check.Dir = repoRoot
+	if err := check.Run(); err != nil {
+		t.Skipf("stock archive commit %s not available in checkout", stockWireCommit)
 	}
 	stockDir := extractStockWire(t, repoRoot, stockWireCommit)
 	if _, err := os.Stat(filepath.Join(stockDir, "cmd", "wire", "main.go")); err != nil {

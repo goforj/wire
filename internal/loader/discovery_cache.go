@@ -14,15 +14,15 @@ import (
 )
 
 type discoveryCacheEntry struct {
-	Version    int
-	WD         string
-	Tags       string
-	Patterns   []string
-	NeedDeps   bool
-	Workspace  string
-	Meta       map[string]*packageMeta
-	Global     []discoveryFileMeta
-	LocalPkgs  []discoveryLocalPackage
+	Version   int
+	WD        string
+	Tags      string
+	Patterns  []string
+	NeedDeps  bool
+	Workspace string
+	Meta      map[string]*packageMeta
+	Global    []discoveryFileMeta
+	LocalPkgs []discoveryLocalPackage
 }
 
 type discoveryLocalPackage struct {

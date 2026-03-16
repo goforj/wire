@@ -71,21 +71,21 @@ type customValidator struct {
 }
 
 type customTypedGraphLoader struct {
-	workspace         string
-	ctx               context.Context
-	env               []string
-	fset              *token.FileSet
-	meta              map[string]*packageMeta
-	targets           map[string]struct{}
-	parseFile         ParseFileFunc
-	packages          map[string]*packages.Package
-	typesPkgs         map[string]*types.Package
-	importer          types.Importer
-	loading           map[string]bool
-	isLocalCache      map[string]bool
-	localSemanticOK   map[string]bool
-	artifactPrefetch  map[string]artifactPrefetchEntry
-	stats             typedLoadStats
+	workspace        string
+	ctx              context.Context
+	env              []string
+	fset             *token.FileSet
+	meta             map[string]*packageMeta
+	targets          map[string]struct{}
+	parseFile        ParseFileFunc
+	packages         map[string]*packages.Package
+	typesPkgs        map[string]*types.Package
+	importer         types.Importer
+	loading          map[string]bool
+	isLocalCache     map[string]bool
+	localSemanticOK  map[string]bool
+	artifactPrefetch map[string]artifactPrefetchEntry
+	stats            typedLoadStats
 }
 
 type artifactPrefetchEntry struct {
@@ -263,21 +263,21 @@ func loadTypedPackageGraphCustom(ctx context.Context, req LazyLoadRequest) (*Laz
 		fset = token.NewFileSet()
 	}
 	l := &customTypedGraphLoader{
-		workspace:         detectModuleRoot(req.WD),
-		ctx:               ctx,
-		env:               append([]string(nil), req.Env...),
-		fset:              fset,
-		meta:              meta,
-		targets:           map[string]struct{}{req.Package: {}},
-		parseFile:         req.ParseFile,
-		packages:          make(map[string]*packages.Package, len(meta)),
-		typesPkgs:         make(map[string]*types.Package, len(meta)),
-		importer:          importerpkg.ForCompiler(token.NewFileSet(), "gc", nil),
-		loading:           make(map[string]bool, len(meta)),
-		isLocalCache:      make(map[string]bool, len(meta)),
-		localSemanticOK:   make(map[string]bool, len(meta)),
-		artifactPrefetch:  make(map[string]artifactPrefetchEntry, len(meta)),
-		stats:             typedLoadStats{discovery: discoveryDuration},
+		workspace:        detectModuleRoot(req.WD),
+		ctx:              ctx,
+		env:              append([]string(nil), req.Env...),
+		fset:             fset,
+		meta:             meta,
+		targets:          map[string]struct{}{req.Package: {}},
+		parseFile:        req.ParseFile,
+		packages:         make(map[string]*packages.Package, len(meta)),
+		typesPkgs:        make(map[string]*types.Package, len(meta)),
+		importer:         importerpkg.ForCompiler(token.NewFileSet(), "gc", nil),
+		loading:          make(map[string]bool, len(meta)),
+		isLocalCache:     make(map[string]bool, len(meta)),
+		localSemanticOK:  make(map[string]bool, len(meta)),
+		artifactPrefetch: make(map[string]artifactPrefetchEntry, len(meta)),
+		stats:            typedLoadStats{discovery: discoveryDuration},
 	}
 	prefetchStart := time.Now()
 	l.prefetchArtifacts()
@@ -345,21 +345,21 @@ func loadPackagesCustom(ctx context.Context, req PackageLoadRequest) (*PackageLo
 		return nil, unsupportedError{reason: "no root packages from metadata"}
 	}
 	l := &customTypedGraphLoader{
-		workspace:         detectModuleRoot(req.WD),
-		ctx:               ctx,
-		env:               append([]string(nil), req.Env...),
-		fset:              fset,
-		meta:              meta,
-		targets:           targets,
-		parseFile:         req.ParseFile,
-		packages:          make(map[string]*packages.Package, len(meta)),
-		typesPkgs:         make(map[string]*types.Package, len(meta)),
-		importer:          importerpkg.ForCompiler(token.NewFileSet(), "gc", nil),
-		loading:           make(map[string]bool, len(meta)),
-		isLocalCache:      make(map[string]bool, len(meta)),
-		localSemanticOK:   make(map[string]bool, len(meta)),
-		artifactPrefetch:  make(map[string]artifactPrefetchEntry, len(meta)),
-		stats:             typedLoadStats{discovery: discoveryDuration},
+		workspace:        detectModuleRoot(req.WD),
+		ctx:              ctx,
+		env:              append([]string(nil), req.Env...),
+		fset:             fset,
+		meta:             meta,
+		targets:          targets,
+		parseFile:        req.ParseFile,
+		packages:         make(map[string]*packages.Package, len(meta)),
+		typesPkgs:        make(map[string]*types.Package, len(meta)),
+		importer:         importerpkg.ForCompiler(token.NewFileSet(), "gc", nil),
+		loading:          make(map[string]bool, len(meta)),
+		isLocalCache:     make(map[string]bool, len(meta)),
+		localSemanticOK:  make(map[string]bool, len(meta)),
+		artifactPrefetch: make(map[string]artifactPrefetchEntry, len(meta)),
+		stats:            typedLoadStats{discovery: discoveryDuration},
 	}
 	prefetchStart := time.Now()
 	l.prefetchArtifacts()

@@ -29,9 +29,9 @@ import (
 )
 
 type diffCmd struct {
-	headerFile  string
-	tags        string
-	profile     profileFlags
+	headerFile string
+	tags       string
+	profile    profileFlags
 }
 
 // Name returns the subcommand name.

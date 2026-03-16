@@ -26,8 +26,8 @@ import (
 )
 
 type checkCmd struct {
-	tags        string
-	profile     profileFlags
+	tags    string
+	profile profileFlags
 }
 
 // Name returns the subcommand name.

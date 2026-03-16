@@ -10,9 +10,9 @@ func TestWireCacheTargetsDefault(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cache")
 	got := wireCacheTargets(nil, base)
 	want := map[string]string{
-		"discovery-cache":   filepath.Join(base, "wire", "discovery-cache"),
-		"loader-artifacts":  filepath.Join(base, "wire", "loader-artifacts"),
-		"output-cache":      filepath.Join(base, "wire", "output-cache"),
+		"discovery-cache":    filepath.Join(base, "wire", "discovery-cache"),
+		"loader-artifacts":   filepath.Join(base, "wire", "loader-artifacts"),
+		"output-cache":       filepath.Join(base, "wire", "output-cache"),
 		"semantic-artifacts": filepath.Join(base, "wire", "semantic-artifacts"),
 	}
 	if len(got) != len(want) {
@@ -50,9 +50,9 @@ func TestWireCacheTargetsRespectOverrides(t *testing.T) {
 	}
 	got := wireCacheTargets(env, base)
 	want := map[string]string{
-		"discovery-cache":   filepath.Join(base, "wire", "discovery-cache"),
-		"loader-artifacts":  filepath.Join(base, "loader"),
-		"output-cache":      filepath.Join(base, "output"),
+		"discovery-cache":    filepath.Join(base, "wire", "discovery-cache"),
+		"loader-artifacts":   filepath.Join(base, "loader"),
+		"output-cache":       filepath.Join(base, "output"),
 		"semantic-artifacts": filepath.Join(base, "semantic"),
 	}
 	for _, target := range got {
