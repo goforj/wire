@@ -3182,9 +3182,9 @@ func normalizePathForCompare(path string) string {
 		return ""
 	}
 	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != "" {
-		return filepath.Clean(resolved)
+		return filepath.ToSlash(filepath.Clean(resolved))
 	}
-	return filepath.Clean(path)
+	return filepath.ToSlash(filepath.Clean(path))
 }
 
 func comparableErrors(errs []packages.Error) []string {
