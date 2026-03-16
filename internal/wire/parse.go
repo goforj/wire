@@ -562,22 +562,9 @@ func (oc *objectCache) get(obj types.Object) (val interface{}, errs []error) {
 }
 
 func (oc *objectCache) semanticProviderSet(obj *types.Var) (*ProviderSet, bool, []error) {
-	pkg := oc.packages[obj.Pkg().Path()]
-	if pkg == nil {
-		return nil, false, nil
-	}
-	art := oc.semanticArtifact(pkg)
-	if art == nil || !art.Supported {
-		return nil, false, nil
-	}
-	setArt, ok := art.Vars[obj.Name()]
+	setArt, ok := oc.semanticProviderSetArtifact(obj)
 	if !ok {
 		return nil, false, nil
-	}
-	for _, item := range setArt.Items {
-		if item.Kind == "bind" {
-			return nil, false, nil
-		}
 	}
 	pset := &ProviderSet{
 		Pos:     obj.Pos(),
@@ -638,6 +625,27 @@ func (oc *objectCache) semanticProviderSet(obj *types.Var) (*ProviderSet, bool, 
 		return nil, true, errs
 	}
 	return pset, true, nil
+}
+
+func (oc *objectCache) semanticProviderSetArtifact(obj *types.Var) (semanticcache.ProviderSetArtifact, bool) {
+	pkg := oc.packages[obj.Pkg().Path()]
+	if pkg == nil {
+		return semanticcache.ProviderSetArtifact{}, false
+	}
+	art := oc.semanticArtifact(pkg)
+	if art == nil || !art.Supported {
+		return semanticcache.ProviderSetArtifact{}, false
+	}
+	setArt, ok := art.Vars[obj.Name()]
+	if !ok {
+		return semanticcache.ProviderSetArtifact{}, false
+	}
+	for _, item := range setArt.Items {
+		if item.Kind == "bind" {
+			return semanticcache.ProviderSetArtifact{}, false
+		}
+	}
+	return setArt, true
 }
 
 func (oc *objectCache) semanticProvider(importPath, name string) (*Provider, []error) {
