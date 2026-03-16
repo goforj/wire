@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -314,6 +315,9 @@ func runAppKnownToggleTrials(t *testing.T, bin string, features, depPkgs int, ex
 
 func buildWireBinary(t *testing.T, dir, name string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" && filepath.Ext(name) != ".exe" {
+		name += ".exe"
+	}
 	out := filepath.Join(t.TempDir(), name)
 	cmd := exec.Command("go", "build", "-o", out, "./cmd/wire")
 	cmd.Dir = dir
