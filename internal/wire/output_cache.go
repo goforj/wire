@@ -17,7 +17,10 @@ import (
 	"github.com/goforj/wire/internal/loader"
 )
 
-const outputCacheDirEnv = "WIRE_OUTPUT_CACHE_DIR"
+const (
+	outputCacheDirEnv     = "WIRE_OUTPUT_CACHE_DIR"
+	outputCacheEnabledEnv = "WIRE_OUTPUT_CACHE"
+)
 
 type outputCacheEntry struct {
 	Version int
@@ -102,6 +105,9 @@ func writeGenerateOutputCache(candidates map[string]outputCacheCandidate, genera
 
 func outputCacheEnabled(ctx context.Context, wd string, env []string) bool {
 	if effectiveLoaderMode(ctx, wd, env) == loader.ModeFallback {
+		return false
+	}
+	if envValue(env, outputCacheEnabledEnv) == "0" {
 		return false
 	}
 	return envValue(env, "WIRE_LOADER_ARTIFACTS") != "0"
