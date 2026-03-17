@@ -655,25 +655,17 @@ func (oc *objectCache) applySemanticProviderSetItem(pset *ProviderSet, item sema
 }
 
 func (oc *objectCache) semanticProvider(importPath, name string) (*Provider, []error) {
-	obj, err := oc.lookupPackageObject(importPath, name)
+	fn, err := oc.lookupPackageFunc(importPath, name)
 	if err != nil {
 		return nil, []error{err}
-	}
-	fn, ok := obj.(*types.Func)
-	if !ok || fn == nil {
-		return nil, []error{fmt.Errorf("%s.%s is not a provider function", importPath, name)}
 	}
 	return processFuncProvider(oc.fset, fn)
 }
 
 func (oc *objectCache) semanticImportedSet(importPath, name string) (*ProviderSet, []error) {
-	obj, err := oc.lookupPackageObject(importPath, name)
+	v, err := oc.lookupProviderSetVar(importPath, name)
 	if err != nil {
 		return nil, []error{err}
-	}
-	v, ok := obj.(*types.Var)
-	if !ok || v == nil || !isProviderSetType(v.Type()) {
-		return nil, []error{fmt.Errorf("%s.%s is not a provider set", importPath, name)}
 	}
 	item, errs := oc.get(v)
 	if len(errs) > 0 {
@@ -842,6 +834,30 @@ func (oc *objectCache) lookupPackageTypeName(importPath, name string) (*types.Ty
 		return nil, fmt.Errorf("%s.%s is not a named type", importPath, name)
 	}
 	return typeName, nil
+}
+
+func (oc *objectCache) lookupPackageFunc(importPath, name string) (*types.Func, error) {
+	obj, err := oc.lookupPackageObject(importPath, name)
+	if err != nil {
+		return nil, err
+	}
+	fn, ok := obj.(*types.Func)
+	if !ok || fn == nil {
+		return nil, fmt.Errorf("%s.%s is not a provider function", importPath, name)
+	}
+	return fn, nil
+}
+
+func (oc *objectCache) lookupProviderSetVar(importPath, name string) (*types.Var, error) {
+	obj, err := oc.lookupPackageObject(importPath, name)
+	if err != nil {
+		return nil, err
+	}
+	v, ok := obj.(*types.Var)
+	if !ok || v == nil || !isProviderSetType(v.Type()) {
+		return nil, fmt.Errorf("%s.%s is not a provider set", importPath, name)
+	}
+	return v, nil
 }
 
 func applyTypePointers(typ types.Type, count int) types.Type {
