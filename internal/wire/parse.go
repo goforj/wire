@@ -538,8 +538,8 @@ func (oc *objectCache) get(obj types.Object) (val interface{}, errs []error) {
 	switch obj := obj.(type) {
 	case *types.Var:
 		spec := oc.varDecl(obj)
-		if spec == nil && isProviderSetType(obj.Type()) {
-			if pset, ok, errs := oc.semanticProviderSet(obj); ok {
+		if isProviderSetType(obj.Type()) {
+			if pset, ok, errs := oc.providerSetForVar(obj, spec); ok {
 				return pset, errs
 			}
 		}
@@ -559,6 +559,13 @@ func (oc *objectCache) get(obj types.Object) (val interface{}, errs []error) {
 	default:
 		return nil, []error{fmt.Errorf("%v is not a provider or a provider set", obj)}
 	}
+}
+
+func (oc *objectCache) providerSetForVar(obj *types.Var, spec *ast.ValueSpec) (*ProviderSet, bool, []error) {
+	if spec != nil {
+		return nil, false, nil
+	}
+	return oc.semanticProviderSet(obj)
 }
 
 func (oc *objectCache) semanticProviderSet(obj *types.Var) (*ProviderSet, bool, []error) {
@@ -1213,22 +1220,10 @@ func summarizeTypeRef(typ types.Type) (semanticcache.TypeRef, bool) {
 }
 
 func semanticVarDecl(pkg *packages.Package, obj *types.Var) *ast.ValueSpec {
-	pos := obj.Pos()
-	for _, f := range pkg.Syntax {
-		tokenFile := pkg.Fset.File(f.Pos())
-		if tokenFile == nil {
-			continue
-		}
-		if base := tokenFile.Base(); base <= int(pos) && int(pos) < base+tokenFile.Size() {
-			path, _ := astutil.PathEnclosingInterval(f, pos, pos)
-			for _, node := range path {
-				if spec, ok := node.(*ast.ValueSpec); ok {
-					return spec
-				}
-			}
-		}
+	if pkg == nil {
+		return nil
 	}
-	return nil
+	return valueSpecForVar(pkg.Fset, pkg.Syntax, obj)
 }
 
 // varDecl finds the declaration that defines the given variable.
@@ -1236,9 +1231,19 @@ func (oc *objectCache) varDecl(obj *types.Var) *ast.ValueSpec {
 	// TODO(light): Walk files to build object -> declaration mapping, if more performant.
 	// Recommended by https://golang.org/s/types-tutorial
 	pkg := oc.packages[obj.Pkg().Path()]
+	if pkg == nil {
+		return nil
+	}
+	return valueSpecForVar(oc.fset, pkg.Syntax, obj)
+}
+
+func valueSpecForVar(fset *token.FileSet, files []*ast.File, obj *types.Var) *ast.ValueSpec {
 	pos := obj.Pos()
-	for _, f := range pkg.Syntax {
-		tokenFile := oc.fset.File(f.Pos())
+	for _, f := range files {
+		tokenFile := fset.File(f.Pos())
+		if tokenFile == nil {
+			continue
+		}
 		if base := tokenFile.Base(); base <= int(pos) && int(pos) < base+tokenFile.Size() {
 			path, _ := astutil.PathEnclosingInterval(f, pos, pos)
 			for _, node := range path {
