@@ -21,6 +21,7 @@ const (
 	importBenchBreakdown  = "WIRE_IMPORT_BENCH_BREAKDOWN"
 	importBenchScenarios  = "WIRE_IMPORT_BENCH_SCENARIOS"
 	importBenchScenarioBD = "WIRE_IMPORT_BENCH_SCENARIO_BREAKDOWN"
+	importBenchProfile    = "WIRE_IMPORT_BENCH_PROFILE"
 	stockWireCommit       = "9c25c9016f6825302537c4efdd5e897976f9c826"
 	stockWireModulePath   = "github.com/google/wire"
 	currentWireModulePath = "github.com/goforj/wire"
@@ -144,6 +145,18 @@ func TestPrintImportScenarioBenchmarkTable(t *testing.T) {
 		{localPkgs: 10, depPkgs: 1000, label: "local-high"},
 		{localPkgs: 10, depPkgs: 25, external: true, label: "external"},
 		{localPkgs: 10, depPkgs: 100, external: true, label: "external"},
+	}
+	if filter := os.Getenv(importBenchProfile); filter != "" {
+		filtered := make([]appBenchProfile, 0, len(profiles))
+		for _, profile := range profiles {
+			if profile.label == filter {
+				filtered = append(filtered, profile)
+			}
+		}
+		if len(filtered) == 0 {
+			t.Fatalf("%s=%q did not match any benchmark profile", importBenchProfile, filter)
+		}
+		profiles = filtered
 	}
 	rows := make([]importBenchScenarioRow, 0, len(profiles)*6)
 	for _, profile := range profiles {
