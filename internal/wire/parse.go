@@ -1713,18 +1713,12 @@ func processFieldsOf(fset *token.FileSet, info *types.Info, call *ast.CallExpr) 
 		if err != nil {
 			return nil, notePosition(fset.Position(call.Pos()), err)
 		}
-		out := []types.Type{v.Type()}
-		if isPtrToStruct {
-			// If the field is from a pointer to a struct, then
-			// wire.Fields also provides a pointer to the field.
-			out = append(out, types.NewPointer(v.Type()))
-		}
 		fields = append(fields, &Field{
 			Parent: structPtr.Elem(),
 			Name:   v.Name(),
 			Pkg:    v.Pkg(),
 			Pos:    v.Pos(),
-			Out:    out,
+			Out:    fieldOutputTypes(v.Type(), isPtrToStruct),
 		})
 	}
 	return fields, nil
