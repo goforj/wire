@@ -821,15 +821,7 @@ func (oc *objectCache) semanticType(ref semanticcache.TypeRef) (types.Type, erro
 }
 
 func (oc *objectCache) semanticTypeName(ref semanticcache.TypeRef) (*types.TypeName, error) {
-	obj, err := oc.lookupPackageObject(ref.ImportPath, ref.Name)
-	if err != nil {
-		return nil, err
-	}
-	typeName, ok := obj.(*types.TypeName)
-	if !ok || typeName == nil {
-		return nil, fmt.Errorf("%s.%s is not a named type", ref.ImportPath, ref.Name)
-	}
-	return typeName, nil
+	return oc.lookupPackageTypeName(ref.ImportPath, ref.Name)
 }
 
 func (oc *objectCache) lookupPackageObject(importPath, name string) (types.Object, error) {
@@ -838,6 +830,18 @@ func (oc *objectCache) lookupPackageObject(importPath, name string) (types.Objec
 		return nil, fmt.Errorf("missing typed package for %s", importPath)
 	}
 	return pkg.Types.Scope().Lookup(name), nil
+}
+
+func (oc *objectCache) lookupPackageTypeName(importPath, name string) (*types.TypeName, error) {
+	obj, err := oc.lookupPackageObject(importPath, name)
+	if err != nil {
+		return nil, err
+	}
+	typeName, ok := obj.(*types.TypeName)
+	if !ok || typeName == nil {
+		return nil, fmt.Errorf("%s.%s is not a named type", importPath, name)
+	}
+	return typeName, nil
 }
 
 func applyTypePointers(typ types.Type, count int) types.Type {
