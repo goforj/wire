@@ -788,13 +788,13 @@ func providerInputForVar(v *types.Var) ProviderInput {
 }
 
 func typeAndPointer(typ types.Type) []types.Type {
-	return []types.Type{typ, types.NewPointer(typ)}
+	return []types.Type{typ, applyTypePointers(typ, 1)}
 }
 
 func fieldOutputTypes(typ types.Type, includePointer bool) []types.Type {
 	out := []types.Type{typ}
 	if includePointer {
-		out = append(out, types.NewPointer(typ))
+		out = append(out, applyTypePointers(typ, 1))
 	}
 	return out
 }
@@ -814,11 +814,7 @@ func (oc *objectCache) semanticType(ref semanticcache.TypeRef) (types.Type, erro
 	if err != nil {
 		return nil, err
 	}
-	var typ types.Type = typeName.Type()
-	for i := 0; i < ref.Pointer; i++ {
-		typ = types.NewPointer(typ)
-	}
-	return typ, nil
+	return applyTypePointers(typeName.Type(), ref.Pointer), nil
 }
 
 func (oc *objectCache) semanticTypeName(ref semanticcache.TypeRef) (*types.TypeName, error) {
@@ -839,6 +835,13 @@ func (oc *objectCache) lookupPackageObject(importPath, name string) (types.Objec
 		return nil, fmt.Errorf("missing typed package for %s", importPath)
 	}
 	return pkg.Types.Scope().Lookup(name), nil
+}
+
+func applyTypePointers(typ types.Type, count int) types.Type {
+	for i := 0; i < count; i++ {
+		typ = types.NewPointer(typ)
+	}
+	return typ
 }
 
 func structFromFieldsParent(parent types.Type) (*types.Struct, bool, error) {
