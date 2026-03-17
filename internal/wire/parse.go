@@ -606,12 +606,19 @@ func (oc *objectCache) semanticProviderSetArtifact(obj *types.Var) (semanticcach
 	if !ok {
 		return semanticcache.ProviderSetArtifact{}, false
 	}
-	for _, item := range setArt.Items {
-		if item.Kind == "bind" {
-			return semanticcache.ProviderSetArtifact{}, false
-		}
+	if !semanticProviderSetArtifactSupported(setArt) {
+		return semanticcache.ProviderSetArtifact{}, false
 	}
 	return setArt, true
+}
+
+func semanticProviderSetArtifactSupported(setArt semanticcache.ProviderSetArtifact) bool {
+	for _, item := range setArt.Items {
+		if item.Kind == "bind" {
+			return false
+		}
+	}
+	return true
 }
 
 func (oc *objectCache) applySemanticProviderSetItem(pset *ProviderSet, item semanticcache.ProviderSetItemArtifact) []error {
