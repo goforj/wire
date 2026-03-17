@@ -1043,6 +1043,9 @@ func summarizeSemanticProviderSet(info *types.Info, expr ast.Expr, pkgPath strin
 		}
 		setArt.Items = append(setArt.Items, items...)
 	}
+	if !semanticProviderSetArtifactSupported(setArt) {
+		return semanticcache.ProviderSetArtifact{}, false
+	}
 	return setArt, true
 }
 

@@ -299,14 +299,25 @@ func TestSummarizeSemanticProviderSetTypeOnlyForms(t *testing.T) {
 			&ast.CallExpr{Fun: &ast.SelectorExpr{X: wireIdent, Sel: fieldsIdent}, Args: []ast.Expr{ptrToPtrFooCall, &ast.BasicLit{Kind: token.STRING, Value: "\"Message\""}}},
 		},
 	}
+	if got, ok := summarizeSemanticProviderSet(info, call, "example.com/app"); ok || len(got.Items) != 0 {
+		t.Fatalf("summarizeSemanticProviderSet(bind case) = (%+v, %v), want unsupported", got, ok)
+	}
+
+	call = &ast.CallExpr{
+		Fun: &ast.SelectorExpr{X: wireIdent, Sel: newSetIdent},
+		Args: []ast.Expr{
+			&ast.CallExpr{Fun: &ast.SelectorExpr{X: wireIdent, Sel: structIdent}, Args: []ast.Expr{newFooCall, &ast.BasicLit{Kind: token.STRING, Value: "\"*\""}}},
+			&ast.CallExpr{Fun: &ast.SelectorExpr{X: wireIdent, Sel: fieldsIdent}, Args: []ast.Expr{ptrToPtrFooCall, &ast.BasicLit{Kind: token.STRING, Value: "\"Message\""}}},
+		},
+	}
 	got, ok := summarizeSemanticProviderSet(info, call, "example.com/app")
 	if !ok {
-		t.Fatal("summarizeSemanticProviderSet() = unsupported, want supported")
+		t.Fatal("summarizeSemanticProviderSet(non-bind type-only forms) = unsupported, want supported")
 	}
-	if len(got.Items) != 3 {
-		t.Fatalf("items len = %d, want 3", len(got.Items))
+	if len(got.Items) != 2 {
+		t.Fatalf("items len = %d, want 2", len(got.Items))
 	}
-	if got.Items[0].Kind != "bind" || got.Items[1].Kind != "struct" || got.Items[2].Kind != "fields" {
+	if got.Items[0].Kind != "struct" || got.Items[1].Kind != "fields" {
 		t.Fatalf("unexpected kinds: %+v", got.Items)
 	}
 }
