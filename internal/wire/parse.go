@@ -36,6 +36,8 @@ import (
 	"github.com/goforj/wire/internal/semanticcache"
 )
 
+const semanticReconstructionEnv = "WIRE_SEMANTIC_RECONSTRUCTION"
+
 // A providerSetSrc captures the source for a type provided by a ProviderSet.
 // Exactly one of the fields will be set.
 type providerSetSrc struct {
@@ -491,7 +493,9 @@ func newObjectCacheWithEnv(pkgs []*packages.Package, env []string) *objectCache 
 	// call to packages.Load and an import path X, there will exist only
 	// one *packages.Package value with PkgPath X.
 	oc.registerPackages(pkgs, false)
-	oc.recordSemanticArtifacts()
+	if semanticReconstructionEnabled(env) {
+		oc.recordSemanticArtifacts()
+	}
 	return oc
 }
 
@@ -588,6 +592,9 @@ func (oc *objectCache) semanticProviderSet(obj *types.Var) (*ProviderSet, bool, 
 }
 
 func (oc *objectCache) semanticProviderSetArtifact(obj *types.Var) (semanticcache.ProviderSetArtifact, bool) {
+	if !semanticReconstructionEnabled(oc.env) {
+		return semanticcache.ProviderSetArtifact{}, false
+	}
 	pkg := oc.packages[obj.Pkg().Path()]
 	if pkg == nil {
 		return semanticcache.ProviderSetArtifact{}, false
@@ -926,6 +933,9 @@ func lookupQuotedStructField(st *types.Struct, quotedName string) (*types.Var, i
 }
 
 func (oc *objectCache) semanticArtifact(pkg *packages.Package) *semanticcache.PackageArtifact {
+	if !semanticReconstructionEnabled(oc.env) {
+		return nil
+	}
 	if pkg == nil {
 		return nil
 	}
@@ -945,7 +955,7 @@ func (oc *objectCache) semanticArtifact(pkg *packages.Package) *semanticcache.Pa
 }
 
 func (oc *objectCache) recordSemanticArtifacts() {
-	if len(oc.env) == 0 {
+	if len(oc.env) == 0 || !semanticReconstructionEnabled(oc.env) {
 		return
 	}
 	for _, pkg := range oc.packages {
@@ -960,6 +970,16 @@ func (oc *objectCache) recordSemanticArtifacts() {
 		oc.semantic[pkg.PkgPath] = art
 		_ = writeSemanticArtifact(oc.env, importPath, packageName, files, art)
 	}
+}
+
+func semanticReconstructionEnabled(env []string) bool {
+	for i := len(env) - 1; i >= 0; i-- {
+		key, value, ok := strings.Cut(env[i], "=")
+		if ok && key == semanticReconstructionEnv {
+			return value == "1"
+		}
+	}
+	return false
 }
 
 func semanticArtifactInputs(env []string, pkg *packages.Package) (importPath, packageName string, files []string, ok bool) {

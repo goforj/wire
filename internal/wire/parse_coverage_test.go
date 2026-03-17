@@ -345,6 +345,7 @@ func TestObjectCacheSemanticProviderSetFallback(t *testing.T) {
 		Imports: make(map[string]*packages.Package),
 	}
 	oc := &objectCache{
+		env:      []string{"WIRE_SEMANTIC_RECONSTRUCTION=1"},
 		fset:     fset,
 		packages: map[string]*packages.Package{depPkg.PkgPath: depPkg},
 		objects:  make(map[objRef]objCacheEntry),
@@ -406,6 +407,7 @@ func TestObjectCacheSemanticProviderSetSkipsBindArtifacts(t *testing.T) {
 		Imports: make(map[string]*packages.Package),
 	}
 	oc := &objectCache{
+		env:      []string{"WIRE_SEMANTIC_RECONSTRUCTION=1"},
 		fset:     fset,
 		packages: map[string]*packages.Package{appPkg.PkgPath: appPkg},
 		objects:  make(map[objRef]objCacheEntry),
