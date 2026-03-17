@@ -173,8 +173,7 @@ func validateTouchedPackagesCustom(ctx context.Context, req TouchedValidationReq
 }
 
 func loadRootGraphCustom(ctx context.Context, req RootLoadRequest) (*RootLoadResult, error) {
-	discoveryStart := time.Now()
-	meta, err := runGoList(ctx, goListRequest{
+	meta, discoveryDuration, err := loadCustomMeta(ctx, goListRequest{
 		WD:       req.WD,
 		Env:      req.Env,
 		Tags:     req.Tags,
@@ -184,10 +183,7 @@ func loadRootGraphCustom(ctx context.Context, req RootLoadRequest) (*RootLoadRes
 	if err != nil {
 		return nil, err
 	}
-	logTiming(ctx, "loader.custom.root.discovery", discoveryStart)
-	if len(meta) == 0 {
-		return nil, unsupportedError{reason: "empty go list result"}
-	}
+	logDuration(ctx, "loader.custom.root.discovery", discoveryDuration)
 	pkgs := packageStubGraphFromMeta(nil, meta)
 	rootPaths := nonDepRootImportPaths(meta)
 	roots := make([]*packages.Package, 0, len(rootPaths))
@@ -219,22 +215,10 @@ func loadTypedPackageGraphCustom(ctx context.Context, req LazyLoadRequest) (*Laz
 		meta map[string]*packageMeta
 		err  error
 	)
-	discoveryStart := time.Now()
-	if req.Discovery != nil && len(req.Discovery.meta) > 0 {
-		meta = req.Discovery.meta
-	} else {
-		meta, err = runGoList(ctx, goListRequest{
-			WD:       req.WD,
-			Env:      req.Env,
-			Tags:     req.Tags,
-			Patterns: []string{req.Package},
-			NeedDeps: true,
-		})
-		if err != nil {
-			return nil, err
-		}
+	meta, discoveryDuration, err := loadCustomLazyMeta(ctx, req)
+	if err != nil {
+		return nil, err
 	}
-	discoveryDuration := time.Since(discoveryStart)
 	roots, err := loadCustomPackagesFromMeta(ctx, req.WD, req.Env, req.Fset, meta, map[string]struct{}{req.Package: {}}, []string{req.Package}, req.ParseFile, discoveryDuration, "lazy")
 	if err != nil {
 		return nil, err
@@ -246,8 +230,7 @@ func loadTypedPackageGraphCustom(ctx context.Context, req LazyLoadRequest) (*Laz
 }
 
 func loadPackagesCustom(ctx context.Context, req PackageLoadRequest) (*PackageLoadResult, error) {
-	discoveryStart := time.Now()
-	meta, err := runGoList(ctx, goListRequest{
+	meta, discoveryDuration, err := loadCustomMeta(ctx, goListRequest{
 		WD:       req.WD,
 		Env:      req.Env,
 		Tags:     req.Tags,
@@ -257,7 +240,6 @@ func loadPackagesCustom(ctx context.Context, req PackageLoadRequest) (*PackageLo
 	if err != nil {
 		return nil, err
 	}
-	discoveryDuration := time.Since(discoveryStart)
 	rootPaths := nonDepRootImportPaths(meta)
 	targets := make(map[string]struct{}, len(rootPaths))
 	for _, path := range rootPaths {
@@ -290,6 +272,32 @@ func loadCustomPackagesFromMeta(ctx context.Context, wd string, env []string, fs
 	}
 	logTypedLoadStats(ctx, mode, l.stats)
 	return roots, nil
+}
+
+func loadCustomMeta(ctx context.Context, req goListRequest) (map[string]*packageMeta, time.Duration, error) {
+	start := time.Now()
+	meta, err := runGoList(ctx, req)
+	duration := time.Since(start)
+	if err != nil {
+		return nil, duration, err
+	}
+	if len(meta) == 0 {
+		return nil, duration, unsupportedError{reason: "empty go list result"}
+	}
+	return meta, duration, nil
+}
+
+func loadCustomLazyMeta(ctx context.Context, req LazyLoadRequest) (map[string]*packageMeta, time.Duration, error) {
+	if req.Discovery != nil && len(req.Discovery.meta) > 0 {
+		return req.Discovery.meta, 0, nil
+	}
+	return loadCustomMeta(ctx, goListRequest{
+		WD:       req.WD,
+		Env:      req.Env,
+		Tags:     req.Tags,
+		Patterns: []string{req.Package},
+		NeedDeps: true,
+	})
 }
 
 func loadCustomRootPackages(l *customTypedGraphLoader, paths []string) ([]*packages.Package, error) {
@@ -994,7 +1002,7 @@ func importName(spec *ast.ImportSpec) string {
 }
 
 func discoverTouchedMetadata(ctx context.Context, req TouchedValidationRequest) (map[string]*packageMeta, error) {
-	metas, err := runGoList(ctx, goListRequest{
+	metas, _, err := loadCustomMeta(ctx, goListRequest{
 		WD:       req.WD,
 		Env:      req.Env,
 		Tags:     req.Tags,
@@ -1003,9 +1011,6 @@ func discoverTouchedMetadata(ctx context.Context, req TouchedValidationRequest) 
 	})
 	if err != nil {
 		return nil, err
-	}
-	if len(metas) == 0 {
-		return nil, unsupportedError{reason: "empty go list result"}
 	}
 	for _, touched := range req.Touched {
 		if _, ok := metas[touched]; !ok {
