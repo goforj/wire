@@ -22,6 +22,9 @@ const (
 	importBenchScenarios  = "WIRE_IMPORT_BENCH_SCENARIOS"
 	importBenchScenarioBD = "WIRE_IMPORT_BENCH_SCENARIO_BREAKDOWN"
 	importBenchProfile    = "WIRE_IMPORT_BENCH_PROFILE"
+	importBenchProfileRun = "WIRE_IMPORT_BENCH_PROFILE_RUN"
+	importBenchVariant    = "WIRE_IMPORT_BENCH_VARIANT"
+	importBenchCPUProfile = "WIRE_IMPORT_BENCH_CPU_PROFILE"
 	stockWireCommit       = "9c25c9016f6825302537c4efdd5e897976f9c826"
 	stockWireModulePath   = "github.com/google/wire"
 	currentWireModulePath = "github.com/goforj/wire"
@@ -134,18 +137,7 @@ func TestPrintImportScenarioBenchmarkTable(t *testing.T) {
 	stockDir := extractStockWire(t, repoRoot, stockWireCommit)
 	stockBin := buildWireBinary(t, stockDir, "stock-wire")
 
-	type appBenchProfile struct {
-		localPkgs int
-		depPkgs   int
-		external  bool
-		label     string
-	}
-	profiles := []appBenchProfile{
-		{localPkgs: 10, depPkgs: 25, label: "local"},
-		{localPkgs: 10, depPkgs: 1000, label: "local-high"},
-		{localPkgs: 10, depPkgs: 25, external: true, label: "external-low"},
-		{localPkgs: 10, depPkgs: 100, external: true, label: "external-high"},
-	}
+	profiles := importBenchAppProfiles()
 	if filter := os.Getenv(importBenchProfile); filter != "" {
 		filtered := make([]appBenchProfile, 0, len(profiles))
 		for _, profile := range profiles {
@@ -266,6 +258,61 @@ func TestPrintImportScenarioBenchmarkBreakdown(t *testing.T) {
 	printScenarioTimingLines(currentOutput)
 }
 
+func TestProfileCurrentWireScenarioRun(t *testing.T) {
+	if os.Getenv(importBenchProfileRun) != "1" {
+		t.Skipf("%s not set", importBenchProfileRun)
+	}
+	profile := os.Getenv(importBenchProfile)
+	variant := os.Getenv(importBenchVariant)
+	cpuProfile := os.Getenv(importBenchCPUProfile)
+	if profile == "" {
+		t.Fatalf("%s must be set", importBenchProfile)
+	}
+	if variant == "" {
+		t.Fatalf("%s must be set", importBenchVariant)
+	}
+	if cpuProfile == "" {
+		t.Fatalf("%s must be set", importBenchCPUProfile)
+	}
+	repoRoot, err := importBenchRepoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentBin := buildWireBinary(t, repoRoot, "current-wire")
+	profileCfg, err := importBenchAppProfile(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkgDir := createAppShapeBenchFixture(t, profileCfg.localPkgs, profileCfg.depPkgs, profileCfg.external, currentWireModulePath, repoRoot)
+	caches := newBenchCaches(t)
+	prewarmGoBenchCache(t, pkgDir, caches)
+	root := filepath.Dir(pkgDir)
+
+	switch variant {
+	case "unchanged":
+		_ = runWireBenchCommand(t, currentBin, pkgDir, caches)
+	case "body", "shape", "import":
+		resetAppShapeBenchFixture(t, pkgDir, profileCfg.localPkgs)
+		_ = runWireBenchCommand(t, currentBin, pkgDir, caches)
+		writeAppShapeControllerFile(t, root, 0, variant)
+	case "known-toggle":
+		resetAppShapeBenchFixture(t, pkgDir, profileCfg.localPkgs)
+		_ = runWireBenchCommand(t, currentBin, pkgDir, caches)
+		writeAppShapeControllerFile(t, root, 0, "shape")
+		_ = runWireBenchCommand(t, currentBin, pkgDir, caches)
+		writeAppShapeControllerFile(t, root, 0, "base")
+	default:
+		t.Fatalf("unknown %s %q", importBenchVariant, variant)
+	}
+
+	dur, output := runWireBenchCommandOutput(t, currentBin, pkgDir, caches, "-cpuprofile="+cpuProfile, "-timings")
+	fmt.Printf("profile: %s\n", profile)
+	fmt.Printf("variant: %s\n", variant)
+	fmt.Printf("duration: %s\n", formatMs(dur))
+	fmt.Printf("cpuprofile: %s\n", cpuProfile)
+	printScenarioTimingLines(output)
+}
+
 func BenchmarkCurrentWireLocalProfile(b *testing.B) {
 	repoRoot, err := importBenchRepoRoot()
 	if err != nil {
@@ -283,6 +330,31 @@ func BenchmarkCurrentWireLocalProfile(b *testing.B) {
 			benchmarkCurrentWireAppScenario(b, currentBin, repoRoot, features, depPkgs, external, variant)
 		})
 	}
+}
+
+type appBenchProfile struct {
+	localPkgs int
+	depPkgs   int
+	external  bool
+	label     string
+}
+
+func importBenchAppProfiles() []appBenchProfile {
+	return []appBenchProfile{
+		{localPkgs: 10, depPkgs: 25, label: "local"},
+		{localPkgs: 10, depPkgs: 1000, label: "local-high"},
+		{localPkgs: 10, depPkgs: 25, external: true, label: "external-low"},
+		{localPkgs: 10, depPkgs: 100, external: true, label: "external-high"},
+	}
+}
+
+func importBenchAppProfile(label string) (appBenchProfile, error) {
+	for _, profile := range importBenchAppProfiles() {
+		if profile.label == label {
+			return profile, nil
+		}
+	}
+	return appBenchProfile{}, fmt.Errorf("%s=%q did not match any benchmark profile", importBenchProfile, label)
 }
 
 func runAppColdTrials(t *testing.T, bin string, features, depPkgs int, external bool, wireModulePath, wireReplaceDir string, trials int) []time.Duration {
