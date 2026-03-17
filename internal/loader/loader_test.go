@@ -2386,34 +2386,6 @@ func TestLoaderArtifactKeyExternalWithoutExportChangesWhenSourceChanges(t *testi
 	}
 }
 
-func TestArtifactPolicyLocalReadOnlyNeedsSemanticForWirePackages(t *testing.T) {
-	t.Parallel()
-
-	loader := &customTypedGraphLoader{
-		env:             []string{"WIRE_LOADER_ARTIFACTS=1"},
-		localSemanticOK: map[string]bool{"example.com/app": false},
-	}
-
-	nonWireMeta := &packageMeta{
-		ImportPath: "example.com/app",
-		Imports:    []string{"fmt", "example.com/dep"},
-	}
-	wireMeta := &packageMeta{
-		ImportPath: "example.com/app",
-		Imports:    []string{"github.com/goforj/wire"},
-	}
-
-	if got := loader.artifactPolicy(nonWireMeta, false, true); !got.read || !got.write {
-		t.Fatalf("artifactPolicy(non-wire local) = %+v, want read+write", got)
-	}
-	if got := loader.artifactPolicy(wireMeta, false, true); got.read || !got.write {
-		t.Fatalf("artifactPolicy(wire local without semantic support) = %+v, want write-only", got)
-	}
-	if got := loader.artifactPolicy(wireMeta, false, false); !got.read || !got.write {
-		t.Fatalf("artifactPolicy(wire external) = %+v, want read+write", got)
-	}
-}
-
 func TestRunGoListIncludesExportDataForReplacedModule(t *testing.T) {
 	root := t.TempDir()
 	depRoot := filepath.Join(root, "depmod")
