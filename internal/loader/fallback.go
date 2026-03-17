@@ -24,6 +24,15 @@ import (
 
 type defaultLoader struct{}
 
+func fallbackReasonDetail(mode Mode, detail string) (FallbackReason, string) {
+	switch mode {
+	case ModeFallback:
+		return FallbackReasonForcedFallback, ""
+	default:
+		return FallbackReasonCustomUnsupported, detail
+	}
+}
+
 func (defaultLoader) LoadPackages(ctx context.Context, req PackageLoadRequest) (*PackageLoadResult, error) {
 	var unsupported unsupportedError
 	if req.LoaderMode != ModeFallback {
@@ -38,15 +47,7 @@ func (defaultLoader) LoadPackages(ctx context.Context, req PackageLoadRequest) (
 	result := &PackageLoadResult{
 		Backend: ModeFallback,
 	}
-	switch req.LoaderMode {
-	case ModeFallback:
-		result.FallbackReason = FallbackReasonForcedFallback
-	default:
-		result.FallbackReason = FallbackReasonCustomUnsupported
-		if unsupported.reason != "" {
-			result.FallbackDetail = unsupported.reason
-		}
-	}
+	result.FallbackReason, result.FallbackDetail = fallbackReasonDetail(req.LoaderMode, unsupported.reason)
 	cfg := &packages.Config{
 		Context:    ctx,
 		Mode:       req.Mode,
@@ -90,15 +91,7 @@ func (defaultLoader) LoadRootGraph(ctx context.Context, req RootLoadRequest) (*R
 	result := &RootLoadResult{
 		Backend: ModeFallback,
 	}
-	switch req.Mode {
-	case ModeFallback:
-		result.FallbackReason = FallbackReasonForcedFallback
-	default:
-		result.FallbackReason = FallbackReasonCustomUnsupported
-		if unsupported.reason != "" {
-			result.FallbackDetail = unsupported.reason
-		}
-	}
+	result.FallbackReason, result.FallbackDetail = fallbackReasonDetail(req.Mode, unsupported.reason)
 	cfg := &packages.Config{
 		Context:    ctx,
 		Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports,
@@ -142,15 +135,7 @@ func (defaultLoader) LoadTypedPackageGraph(ctx context.Context, req LazyLoadRequ
 	result := &LazyLoadResult{
 		Backend: ModeFallback,
 	}
-	switch req.LoaderMode {
-	case ModeFallback:
-		result.FallbackReason = FallbackReasonForcedFallback
-	default:
-		result.FallbackReason = FallbackReasonCustomUnsupported
-		if unsupported.reason != "" {
-			result.FallbackDetail = unsupported.reason
-		}
-	}
+	result.FallbackReason, result.FallbackDetail = fallbackReasonDetail(req.LoaderMode, unsupported.reason)
 	cfg := &packages.Config{
 		Context:    ctx,
 		Mode:       req.Mode,
@@ -194,13 +179,7 @@ func validateTouchedPackagesFallback(ctx context.Context, req TouchedValidationR
 	result := &TouchedValidationResult{
 		Backend: ModeFallback,
 	}
-	switch req.Mode {
-	case ModeFallback:
-		result.FallbackReason = FallbackReasonForcedFallback
-	default:
-		result.FallbackReason = FallbackReasonCustomUnsupported
-		result.FallbackDetail = detail
-	}
+	result.FallbackReason, result.FallbackDetail = fallbackReasonDetail(req.Mode, detail)
 	if len(req.Touched) == 0 {
 		return result, nil
 	}
