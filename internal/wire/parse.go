@@ -706,8 +706,7 @@ func (oc *objectCache) semanticStructProvider(item semanticcache.ProviderSetItem
 	if err != nil {
 		return nil, []error{err}
 	}
-	out := typeName.Type()
-	st, ok := out.Underlying().(*types.Struct)
+	out, st, ok := namedStructType(typeName)
 	if !ok {
 		return nil, []error{fmt.Errorf("%s.%s does not name a struct", item.Type.ImportPath, item.Type.Name)}
 	}
@@ -846,6 +845,12 @@ func applyTypePointers(typ types.Type, count int) types.Type {
 		typ = types.NewPointer(typ)
 	}
 	return typ
+}
+
+func namedStructType(typeName types.Object) (types.Type, *types.Struct, bool) {
+	out := typeName.Type()
+	st, ok := out.Underlying().(*types.Struct)
+	return out, st, ok
 }
 
 func structFromFieldsParent(parent types.Type) (*types.Struct, bool, error) {
@@ -1468,8 +1473,7 @@ func funcOutput(sig *types.Signature) (outputSignature, error) {
 // It will not support any new feature introduced after v0.2. Please use the new
 // wire.Struct syntax for those.
 func processStructLiteralProvider(fset *token.FileSet, typeName *types.TypeName) (*Provider, []error) {
-	out := typeName.Type()
-	st, ok := out.Underlying().(*types.Struct)
+	out, st, ok := namedStructType(typeName)
 	if !ok {
 		return nil, []error{fmt.Errorf("%v does not name a struct", typeName)}
 	}
