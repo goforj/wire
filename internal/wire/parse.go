@@ -580,12 +580,7 @@ func (oc *objectCache) semanticProviderSet(obj *types.Var) (*ProviderSet, bool, 
 	if len(ec.errors) > 0 {
 		return nil, true, ec.errors
 	}
-	var errs []error
-	pset.providerMap, pset.srcMap, errs = buildProviderMap(oc.fset, oc.hasher, pset)
-	if len(errs) > 0 {
-		return nil, true, errs
-	}
-	if errs := verifyAcyclic(pset.providerMap, oc.hasher); len(errs) > 0 {
+	if errs := oc.finalizeProviderSet(pset); len(errs) > 0 {
 		return nil, true, errs
 	}
 	return pset, true, nil
@@ -1361,15 +1356,22 @@ func (oc *objectCache) processNewSet(info *types.Info, pkgPath string, call *ast
 	if len(ec.errors) > 0 {
 		return nil, ec.errors
 	}
-	var errs []error
-	pset.providerMap, pset.srcMap, errs = buildProviderMap(oc.fset, oc.hasher, pset)
-	if len(errs) > 0 {
-		return nil, errs
-	}
-	if errs := verifyAcyclic(pset.providerMap, oc.hasher); len(errs) > 0 {
+	if errs := oc.finalizeProviderSet(pset); len(errs) > 0 {
 		return nil, errs
 	}
 	return pset, nil
+}
+
+func (oc *objectCache) finalizeProviderSet(pset *ProviderSet) []error {
+	var errs []error
+	pset.providerMap, pset.srcMap, errs = buildProviderMap(oc.fset, oc.hasher, pset)
+	if len(errs) > 0 {
+		return errs
+	}
+	if errs := verifyAcyclic(pset.providerMap, oc.hasher); len(errs) > 0 {
+		return errs
+	}
+	return nil
 }
 
 // structArgType attempts to interpret an expression as a simple struct type.
