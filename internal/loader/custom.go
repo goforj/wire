@@ -235,19 +235,10 @@ func loadTypedPackageGraphCustom(ctx context.Context, req LazyLoadRequest) (*Laz
 		}
 	}
 	discoveryDuration := time.Since(discoveryStart)
-	if len(meta) == 0 {
-		return nil, unsupportedError{reason: "empty go list result"}
-	}
-	fset := req.Fset
-	if fset == nil {
-		fset = token.NewFileSet()
-	}
-	l := newCustomTypedGraphLoader(ctx, req.WD, req.Env, fset, meta, map[string]struct{}{req.Package: {}}, req.ParseFile, discoveryDuration)
-	roots, err := loadCustomRootPackages(l, []string{req.Package})
+	roots, err := loadCustomPackagesFromMeta(ctx, req.WD, req.Env, req.Fset, meta, map[string]struct{}{req.Package: {}}, []string{req.Package}, req.ParseFile, discoveryDuration, "lazy")
 	if err != nil {
 		return nil, err
 	}
-	logTypedLoadStats(ctx, "lazy", l.stats)
 	return &LazyLoadResult{
 		Packages: roots,
 		Backend:  ModeCustom,
@@ -267,31 +258,38 @@ func loadPackagesCustom(ctx context.Context, req PackageLoadRequest) (*PackageLo
 		return nil, err
 	}
 	discoveryDuration := time.Since(discoveryStart)
-	if len(meta) == 0 {
-		return nil, unsupportedError{reason: "empty go list result"}
-	}
-	fset := req.Fset
-	if fset == nil {
-		fset = token.NewFileSet()
-	}
 	rootPaths := nonDepRootImportPaths(meta)
 	targets := make(map[string]struct{}, len(rootPaths))
 	for _, path := range rootPaths {
 		targets[path] = struct{}{}
 	}
-	if len(targets) == 0 {
-		return nil, unsupportedError{reason: "no root packages from metadata"}
-	}
-	l := newCustomTypedGraphLoader(ctx, req.WD, req.Env, fset, meta, targets, req.ParseFile, discoveryDuration)
-	roots, err := loadCustomRootPackages(l, rootPaths)
+	roots, err := loadCustomPackagesFromMeta(ctx, req.WD, req.Env, req.Fset, meta, targets, rootPaths, req.ParseFile, discoveryDuration, "typed")
 	if err != nil {
 		return nil, err
 	}
-	logTypedLoadStats(ctx, "typed", l.stats)
 	return &PackageLoadResult{
 		Packages: roots,
 		Backend:  ModeCustom,
 	}, nil
+}
+
+func loadCustomPackagesFromMeta(ctx context.Context, wd string, env []string, fset *token.FileSet, meta map[string]*packageMeta, targets map[string]struct{}, rootPaths []string, parseFile ParseFileFunc, discoveryDuration time.Duration, mode string) ([]*packages.Package, error) {
+	if len(meta) == 0 {
+		return nil, unsupportedError{reason: "empty go list result"}
+	}
+	if len(rootPaths) == 0 {
+		return nil, unsupportedError{reason: "no root packages from metadata"}
+	}
+	if fset == nil {
+		fset = token.NewFileSet()
+	}
+	l := newCustomTypedGraphLoader(ctx, wd, env, fset, meta, targets, parseFile, discoveryDuration)
+	roots, err := loadCustomRootPackages(l, rootPaths)
+	if err != nil {
+		return nil, err
+	}
+	logTypedLoadStats(ctx, mode, l.stats)
+	return roots, nil
 }
 
 func loadCustomRootPackages(l *customTypedGraphLoader, paths []string) ([]*packages.Package, error) {
