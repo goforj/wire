@@ -34,8 +34,6 @@ import (
 
 	"golang.org/x/tools/go/gcexportdata"
 	"golang.org/x/tools/go/packages"
-
-	"github.com/goforj/wire/internal/semanticcache"
 )
 
 type unsupportedError struct {
@@ -93,7 +91,6 @@ type customTypedGraphLoader struct {
 	importer         types.Importer
 	loading          map[string]bool
 	isLocalCache     map[string]bool
-	localSemanticOK  map[string]bool
 	artifactPrefetch map[string]artifactPrefetchEntry
 	stats            typedLoadStats
 }
@@ -530,22 +527,6 @@ func (l *customTypedGraphLoader) loadPackage(path string) (*packages.Package, er
 	return pkg, nil
 }
 
-func (l *customTypedGraphLoader) localSemanticArtifactSupported(meta *packageMeta) bool {
-	if meta == nil {
-		return false
-	}
-	if ok, exists := l.localSemanticOK[meta.ImportPath]; exists {
-		return ok
-	}
-	art, err := semanticcache.Read(l.env, meta.ImportPath, meta.Name, metaFiles(meta))
-	if err != nil || art == nil {
-		l.localSemanticOK[meta.ImportPath] = false
-		return false
-	}
-	l.localSemanticOK[meta.ImportPath] = art.Supported
-	return art.Supported
-}
-
 func (l *customTypedGraphLoader) artifactPolicy(meta *packageMeta, isTarget, isLocal bool) artifactPolicy {
 	if !loaderArtifactEnabled(l.env) || isTarget {
 		return artifactPolicy{}
@@ -553,9 +534,7 @@ func (l *customTypedGraphLoader) artifactPolicy(meta *packageMeta, isTarget, isL
 	policy := artifactPolicy{write: true}
 	if !isLocal {
 		policy.read = true
-		return policy
 	}
-	policy.read = l.localSemanticArtifactSupported(meta)
 	return policy
 }
 
@@ -1185,7 +1164,6 @@ func newCustomTypedGraphLoader(ctx context.Context, wd string, env []string, fse
 		importer:         importerpkg.ForCompiler(token.NewFileSet(), "gc", nil),
 		loading:          make(map[string]bool, len(meta)),
 		isLocalCache:     make(map[string]bool, len(meta)),
-		localSemanticOK:  make(map[string]bool, len(meta)),
 		artifactPrefetch: make(map[string]artifactPrefetchEntry, len(meta)),
 		stats:            typedLoadStats{discovery: discoveryDuration},
 	}

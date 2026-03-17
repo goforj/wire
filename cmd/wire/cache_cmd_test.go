@@ -10,10 +10,9 @@ func TestWireCacheTargetsDefault(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cache")
 	got := wireCacheTargets(nil, base)
 	want := map[string]string{
-		"discovery-cache":    filepath.Join(base, "wire", "discovery-cache"),
-		"loader-artifacts":   filepath.Join(base, "wire", "loader-artifacts"),
-		"output-cache":       filepath.Join(base, "wire", "output-cache"),
-		"semantic-artifacts": filepath.Join(base, "wire", "semantic-artifacts"),
+		"discovery-cache":  filepath.Join(base, "wire", "discovery-cache"),
+		"loader-artifacts": filepath.Join(base, "wire", "loader-artifacts"),
+		"output-cache":     filepath.Join(base, "wire", "output-cache"),
 	}
 	if len(got) != len(want) {
 		t.Fatalf("targets len = %d, want %d", len(got), len(want))
@@ -46,14 +45,12 @@ func TestWireCacheTargetsRespectOverrides(t *testing.T) {
 	env := []string{
 		loaderArtifactDirEnv + "=" + filepath.Join(base, "loader"),
 		outputCacheDirEnv + "=" + filepath.Join(base, "output"),
-		semanticCacheDirEnv + "=" + filepath.Join(base, "semantic"),
 	}
 	got := wireCacheTargets(env, base)
 	want := map[string]string{
-		"discovery-cache":    filepath.Join(base, "wire", "discovery-cache"),
-		"loader-artifacts":   filepath.Join(base, "loader"),
-		"output-cache":       filepath.Join(base, "output"),
-		"semantic-artifacts": filepath.Join(base, "semantic"),
+		"discovery-cache":  filepath.Join(base, "wire", "discovery-cache"),
+		"loader-artifacts": filepath.Join(base, "loader"),
+		"output-cache":     filepath.Join(base, "output"),
 	}
 	for _, target := range got {
 		if target.path != want[target.name] {
@@ -67,7 +64,6 @@ func TestClearWireCachesRemovesTargets(t *testing.T) {
 	env := []string{
 		loaderArtifactDirEnv + "=" + filepath.Join(base, "loader"),
 		outputCacheDirEnv + "=" + filepath.Join(base, "output"),
-		semanticCacheDirEnv + "=" + filepath.Join(base, "semantic"),
 	}
 	for _, target := range wireCacheTargets(env, base) {
 		if err := os.MkdirAll(target.path, 0o755); err != nil {
@@ -85,8 +81,8 @@ func TestClearWireCachesRemovesTargets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("clearWireCaches() error = %v", err)
 	}
-	if len(cleared) != 4 {
-		t.Fatalf("cleared len = %d, want 4", len(cleared))
+	if len(cleared) != 3 {
+		t.Fatalf("cleared len = %d, want 3", len(cleared))
 	}
 	for _, target := range wireCacheTargets(env, base) {
 		if _, err := os.Stat(target.path); !os.IsNotExist(err) {

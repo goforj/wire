@@ -152,7 +152,6 @@ func wireCacheTargets(env []string, userCacheDir string) []cacheTarget {
 	targets := []cacheTarget{
 		{name: "loader-artifacts", path: envValueDefault(env, loaderArtifactDirEnv, filepath.Join(baseWire, "loader-artifacts"))},
 		{name: "discovery-cache", path: filepath.Join(baseWire, "discovery-cache")},
-		{name: "semantic-artifacts", path: envValueDefault(env, semanticCacheDirEnv, filepath.Join(baseWire, "semantic-artifacts"))},
 		{name: "output-cache", path: envValueDefault(env, outputCacheDirEnv, filepath.Join(baseWire, "output-cache"))},
 	}
 	seen := make(map[string]bool, len(targets))
