@@ -716,7 +716,7 @@ func (oc *objectCache) semanticStructProvider(item semanticcache.ProviderSetItem
 		Name:     typeName.Name(),
 		Pos:      typeName.Pos(),
 		IsStruct: true,
-		Out:      []types.Type{out, types.NewPointer(out)},
+		Out:      typeAndPointer(out),
 	}
 	args, errs := semanticStructProviderInputs(st, item)
 	if len(errs) > 0 {
@@ -741,16 +741,12 @@ func (oc *objectCache) semanticFields(item semanticcache.ProviderSetItemArtifact
 		if err != nil {
 			return nil, []error{err}
 		}
-		out := []types.Type{v.Type()}
-		if ptrToField {
-			out = append(out, types.NewPointer(v.Type()))
-		}
 		fields = append(fields, &Field{
 			Parent: parent,
 			Name:   v.Name(),
 			Pkg:    v.Pkg(),
 			Pos:    v.Pos(),
-			Out:    out,
+			Out:    fieldOutputTypes(v.Type(), ptrToField),
 		})
 	}
 	return fields, nil
@@ -783,6 +779,18 @@ func semanticStructProviderInputs(st *types.Struct, item semanticcache.ProviderS
 		})
 	}
 	return args, nil
+}
+
+func typeAndPointer(typ types.Type) []types.Type {
+	return []types.Type{typ, types.NewPointer(typ)}
+}
+
+func fieldOutputTypes(typ types.Type, includePointer bool) []types.Type {
+	out := []types.Type{typ}
+	if includePointer {
+		out = append(out, types.NewPointer(typ))
+	}
+	return out
 }
 
 func (oc *objectCache) semanticType(ref semanticcache.TypeRef) (types.Type, error) {
