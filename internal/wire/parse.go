@@ -711,13 +711,7 @@ func (oc *objectCache) semanticStructProvider(item semanticcache.ProviderSetItem
 	if !ok {
 		return nil, []error{fmt.Errorf("%s.%s does not name a struct", item.Type.ImportPath, item.Type.Name)}
 	}
-	provider := &Provider{
-		Pkg:      typeName.Pkg(),
-		Name:     typeName.Name(),
-		Pos:      typeName.Pos(),
-		IsStruct: true,
-		Out:      typeAndPointer(out),
-	}
+	provider := newStructProvider(typeName, typeAndPointer(out))
 	args, errs := semanticStructProviderInputs(st, item)
 	if len(errs) > 0 {
 		return nil, errs
@@ -791,6 +785,16 @@ func fieldOutputTypes(typ types.Type, includePointer bool) []types.Type {
 		out = append(out, types.NewPointer(typ))
 	}
 	return out
+}
+
+func newStructProvider(typeName types.Object, out []types.Type) *Provider {
+	return &Provider{
+		Pkg:      typeName.Pkg(),
+		Name:     typeName.Name(),
+		Pos:      typeName.Pos(),
+		IsStruct: true,
+		Out:      out,
+	}
 }
 
 func (oc *objectCache) semanticType(ref semanticcache.TypeRef) (types.Type, error) {
@@ -1448,14 +1452,9 @@ func processStructLiteralProvider(fset *token.FileSet, typeName *types.TypeName)
 		notePosition(fset.Position(pos),
 			fmt.Errorf("using struct literal to inject %s is deprecated and will be removed in the next release; use wire.Struct instead",
 				typeName.Type())))
-	provider := &Provider{
-		Pkg:      typeName.Pkg(),
-		Name:     typeName.Name(),
-		Pos:      pos,
-		Args:     make([]ProviderInput, st.NumFields()),
-		IsStruct: true,
-		Out:      []types.Type{out, types.NewPointer(out)},
-	}
+	provider := newStructProvider(typeName, typeAndPointer(out))
+	provider.Pos = pos
+	provider.Args = make([]ProviderInput, st.NumFields())
 	for i := 0; i < st.NumFields(); i++ {
 		f := st.Field(i)
 		provider.Args[i] = ProviderInput{
@@ -1496,13 +1495,7 @@ func processStructProvider(fset *token.FileSet, info *types.Info, call *ast.Call
 
 	stExpr := call.Args[0].(*ast.CallExpr)
 	typeName := qualifiedIdentObject(info, stExpr.Args[0]) // should be either an identifier or selector
-	provider := &Provider{
-		Pkg:      typeName.Pkg(),
-		Name:     typeName.Name(),
-		Pos:      typeName.Pos(),
-		IsStruct: true,
-		Out:      []types.Type{structPtr.Elem(), structPtr},
-	}
+	provider := newStructProvider(typeName, []types.Type{structPtr.Elem(), structPtr})
 	if allFields(call) {
 		for i := 0; i < st.NumFields(); i++ {
 			if isPrevented(st.Tag(i)) {
