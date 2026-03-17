@@ -259,18 +259,13 @@ func loadTypedPackageGraphCustom(ctx context.Context, req LazyLoadRequest) (*Laz
 		fset = token.NewFileSet()
 	}
 	l := newCustomTypedGraphLoader(ctx, req.WD, req.Env, fset, meta, map[string]struct{}{req.Package: {}}, req.ParseFile, discoveryDuration)
-	prefetchStart := time.Now()
-	l.prefetchArtifacts()
-	l.stats.artifactPrefetch = time.Since(prefetchStart)
-	rootLoadStart := time.Now()
-	root, err := l.loadPackage(req.Package)
+	roots, err := loadCustomRootPackages(l, []string{req.Package})
 	if err != nil {
 		return nil, err
 	}
-	l.stats.rootLoad = time.Since(rootLoadStart)
 	logTypedLoadStats(ctx, "lazy", l.stats)
 	return &LazyLoadResult{
-		Packages: []*packages.Package{root},
+		Packages: roots,
 		Backend:  ModeCustom,
 	}, nil
 }
@@ -303,13 +298,26 @@ func loadPackagesCustom(ctx context.Context, req PackageLoadRequest) (*PackageLo
 		return nil, unsupportedError{reason: "no root packages from metadata"}
 	}
 	l := newCustomTypedGraphLoader(ctx, req.WD, req.Env, fset, meta, targets, req.ParseFile, discoveryDuration)
+	rootPaths := nonDepRootImportPaths(meta)
+	roots, err := loadCustomRootPackages(l, rootPaths)
+	if err != nil {
+		return nil, err
+	}
+	logTypedLoadStats(ctx, "typed", l.stats)
+	return &PackageLoadResult{
+		Packages: roots,
+		Backend:  ModeCustom,
+	}, nil
+}
+
+func loadCustomRootPackages(l *customTypedGraphLoader, paths []string) ([]*packages.Package, error) {
 	prefetchStart := time.Now()
 	l.prefetchArtifacts()
 	l.stats.artifactPrefetch = time.Since(prefetchStart)
+
 	rootLoadStart := time.Now()
-	rootPaths := nonDepRootImportPaths(meta)
-	roots := make([]*packages.Package, 0, len(rootPaths))
-	for _, path := range rootPaths {
+	roots := make([]*packages.Package, 0, len(paths))
+	for _, path := range paths {
 		root, err := l.loadPackage(path)
 		if err != nil {
 			return nil, err
@@ -318,11 +326,7 @@ func loadPackagesCustom(ctx context.Context, req PackageLoadRequest) (*PackageLo
 	}
 	l.stats.rootLoad = time.Since(rootLoadStart)
 	sort.Slice(roots, func(i, j int) bool { return roots[i].PkgPath < roots[j].PkgPath })
-	logTypedLoadStats(ctx, "typed", l.stats)
-	return &PackageLoadResult{
-		Packages: roots,
-		Backend:  ModeCustom,
-	}, nil
+	return roots, nil
 }
 
 func (v *customValidator) validatePackage(path string) (*packages.Package, error) {
