@@ -546,12 +546,28 @@ func (l *customTypedGraphLoader) localSemanticArtifactSupported(meta *packageMet
 	return art.Supported
 }
 
+func localPackageNeedsSemanticArtifacts(meta *packageMeta) bool {
+	if meta == nil {
+		return false
+	}
+	for _, path := range meta.Imports {
+		if isWireImportPath(path) {
+			return true
+		}
+	}
+	return false
+}
+
 func (l *customTypedGraphLoader) artifactPolicy(meta *packageMeta, isTarget, isLocal bool) artifactPolicy {
 	if !loaderArtifactEnabled(l.env) || isTarget {
 		return artifactPolicy{}
 	}
 	policy := artifactPolicy{write: true}
 	if !isLocal {
+		policy.read = true
+		return policy
+	}
+	if !localPackageNeedsSemanticArtifacts(meta) {
 		policy.read = true
 		return policy
 	}

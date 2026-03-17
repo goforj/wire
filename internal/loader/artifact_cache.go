@@ -153,9 +153,13 @@ func isProviderSetTypeForLoader(t types.Type) bool {
 	if obj == nil || obj.Pkg() == nil {
 		return false
 	}
-	switch obj.Pkg().Path() {
+	return isWireImportPath(obj.Pkg().Path()) && obj.Name() == "ProviderSet"
+}
+
+func isWireImportPath(path string) bool {
+	switch path {
 	case "github.com/goforj/wire", "github.com/google/wire":
-		return obj.Name() == "ProviderSet"
+		return true
 	default:
 		return false
 	}
