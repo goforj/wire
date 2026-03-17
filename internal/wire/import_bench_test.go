@@ -266,6 +266,25 @@ func TestPrintImportScenarioBenchmarkBreakdown(t *testing.T) {
 	printScenarioTimingLines(currentOutput)
 }
 
+func BenchmarkCurrentWireLocalProfile(b *testing.B) {
+	repoRoot, err := importBenchRepoRoot()
+	if err != nil {
+		b.Fatal(err)
+	}
+	currentBin := buildWireBinary(b, repoRoot, "current-wire")
+	const (
+		features = 10
+		depPkgs  = 25
+		external = false
+	)
+
+	for _, variant := range []string{"unchanged", "body", "shape", "import", "known-toggle"} {
+		b.Run(variant, func(b *testing.B) {
+			benchmarkCurrentWireAppScenario(b, currentBin, repoRoot, features, depPkgs, external, variant)
+		})
+	}
+}
+
 func runAppColdTrials(t *testing.T, bin string, features, depPkgs int, external bool, wireModulePath, wireReplaceDir string, trials int) []time.Duration {
 	t.Helper()
 	durations := make([]time.Duration, 0, trials)
@@ -276,6 +295,35 @@ func runAppColdTrials(t *testing.T, bin string, features, depPkgs int, external 
 		durations = append(durations, runWireBenchCommand(t, bin, pkgDir, caches))
 	}
 	return durations
+}
+
+func benchmarkCurrentWireAppScenario(b *testing.B, bin, repoRoot string, features, depPkgs int, external bool, variant string) {
+	b.Helper()
+	pkgDir := createAppShapeBenchFixture(b, features, depPkgs, external, currentWireModulePath, repoRoot)
+	caches := newBenchCaches(b)
+	root := filepath.Dir(pkgDir)
+	prewarmGoBenchCache(b, pkgDir, caches)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		resetAppShapeBenchFixture(b, pkgDir, features)
+		switch variant {
+		case "body", "shape", "import":
+			_ = runWireBenchCommand(b, bin, pkgDir, caches)
+			writeAppShapeControllerFile(b, root, 0, variant)
+		case "known-toggle":
+			_ = runWireBenchCommand(b, bin, pkgDir, caches)
+			writeAppShapeControllerFile(b, root, 0, "shape")
+			_ = runWireBenchCommand(b, bin, pkgDir, caches)
+			writeAppShapeControllerFile(b, root, 0, "base")
+		case "unchanged":
+			_ = runWireBenchCommand(b, bin, pkgDir, caches)
+		default:
+			b.Fatalf("unknown benchmark variant %q", variant)
+		}
+		b.StartTimer()
+		_ = runWireBenchCommand(b, bin, pkgDir, caches)
+	}
 }
 
 func runAppWarmTrials(t *testing.T, bin string, features, depPkgs int, external bool, wireModulePath, wireReplaceDir string, trials int) []time.Duration {
@@ -326,7 +374,7 @@ func runAppKnownToggleTrials(t *testing.T, bin string, features, depPkgs int, ex
 	return durations
 }
 
-func buildWireBinary(t *testing.T, dir, name string) string {
+func buildWireBinary(t testing.TB, dir, name string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" && filepath.Ext(name) != ".exe" {
 		name += ".exe"
@@ -342,7 +390,7 @@ func buildWireBinary(t *testing.T, dir, name string) string {
 	return out
 }
 
-func newBenchCaches(t *testing.T) benchCaches {
+func newBenchCaches(t testing.TB) benchCaches {
 	t.Helper()
 	return benchCaches{
 		home:    t.TempDir(),
@@ -350,7 +398,7 @@ func newBenchCaches(t *testing.T) benchCaches {
 	}
 }
 
-func extractStockWire(t *testing.T, repoRoot, commit string) string {
+func extractStockWire(t testing.TB, repoRoot, commit string) string {
 	t.Helper()
 	tmp := t.TempDir()
 	cmd := exec.Command("git", "archive", "--format=tar", commit)
@@ -400,7 +448,7 @@ func extractStockWire(t *testing.T, repoRoot, commit string) string {
 	return tmp
 }
 
-func createImportBenchFixture(t *testing.T, imports int, wireModulePath, wireReplaceDir string) string {
+func createImportBenchFixture(t testing.TB, imports int, wireModulePath, wireReplaceDir string) string {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte(importBenchGoMod(wireModulePath, wireReplaceDir)), 0o644); err != nil {
@@ -424,7 +472,7 @@ func createImportBenchFixture(t *testing.T, imports int, wireModulePath, wireRep
 	return filepath.Join(root, "app")
 }
 
-func createAppShapeBenchFixture(t *testing.T, features, depPkgs int, external bool, wireModulePath, wireReplaceDir string) string {
+func createAppShapeBenchFixture(t testing.TB, features, depPkgs int, external bool, wireModulePath, wireReplaceDir string) string {
 	t.Helper()
 	root := t.TempDir()
 	modulePath := "example.com/appbench"
@@ -455,7 +503,7 @@ func createAppShapeBenchFixture(t *testing.T, features, depPkgs int, external bo
 	return filepath.Join(root, "wire")
 }
 
-func writeAppShapeFile(t *testing.T, path, content string) {
+func writeAppShapeFile(t testing.TB, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -465,7 +513,7 @@ func writeAppShapeFile(t *testing.T, path, content string) {
 	}
 }
 
-func writeAppShapeControllerFile(t *testing.T, root string, index int, variant string) {
+func writeAppShapeControllerFile(t testing.TB, root string, index int, variant string) {
 	t.Helper()
 	path := filepath.Join(root, "internal", fmt.Sprintf("feature%04d", index), "controller.go")
 	if err := os.WriteFile(path, []byte(appShapeControllerFile("example.com/appbench", index, variant)), 0o644); err != nil {
@@ -473,7 +521,7 @@ func writeAppShapeControllerFile(t *testing.T, root string, index int, variant s
 	}
 }
 
-func seedAppShapeExternalGoSum(t *testing.T, root string) {
+func seedAppShapeExternalGoSum(t testing.TB, root string) {
 	t.Helper()
 	const source = "/private/tmp/test/go.sum"
 	data, err := os.ReadFile(source)
@@ -485,7 +533,7 @@ func seedAppShapeExternalGoSum(t *testing.T, root string) {
 	}
 }
 
-func resetAppShapeBenchFixture(t *testing.T, pkgDir string, features int) {
+func resetAppShapeBenchFixture(t testing.TB, pkgDir string, features int) {
 	t.Helper()
 	root := filepath.Dir(pkgDir)
 	for i := 0; i < features; i++ {
@@ -1019,13 +1067,13 @@ func runKnownImportToggleTrials(t *testing.T, bin string, imports int, wireModul
 	return durations
 }
 
-func runWireBenchCommand(t *testing.T, bin, pkgDir string, caches benchCaches) time.Duration {
+func runWireBenchCommand(t testing.TB, bin, pkgDir string, caches benchCaches) time.Duration {
 	t.Helper()
 	d, _ := runWireBenchCommandOutput(t, bin, pkgDir, caches)
 	return d
 }
 
-func runWireBenchCommandOutput(t *testing.T, bin, pkgDir string, caches benchCaches, extraArgs ...string) (time.Duration, string) {
+func runWireBenchCommandOutput(t testing.TB, bin, pkgDir string, caches benchCaches, extraArgs ...string) (time.Duration, string) {
 	t.Helper()
 	args := []string{"gen"}
 	args = append(args, extraArgs...)
@@ -1042,7 +1090,7 @@ func runWireBenchCommandOutput(t *testing.T, bin, pkgDir string, caches benchCac
 	return time.Since(start), stderr.String()
 }
 
-func prewarmGoBenchCache(t *testing.T, pkgDir string, caches benchCaches) {
+func prewarmGoBenchCache(t testing.TB, pkgDir string, caches benchCaches) {
 	t.Helper()
 	prepareBenchModule(t, pkgDir, caches)
 	cmd := exec.Command("go", "list", "-deps", "./...")
@@ -1054,7 +1102,7 @@ func prewarmGoBenchCache(t *testing.T, pkgDir string, caches benchCaches) {
 	}
 }
 
-func goListGraphCounts(t *testing.T, pkgDir, modulePath string, caches benchCaches) benchGraphCounts {
+func goListGraphCounts(t testing.TB, pkgDir, modulePath string, caches benchCaches) benchGraphCounts {
 	t.Helper()
 	prepareBenchModule(t, pkgDir, caches)
 	cmd := exec.Command("go", "list", "-deps", "-json", "./...")
@@ -1097,7 +1145,7 @@ func goListGraphCounts(t *testing.T, pkgDir, modulePath string, caches benchCach
 	return counts
 }
 
-func prepareBenchModule(t *testing.T, pkgDir string, caches benchCaches) {
+func prepareBenchModule(t testing.TB, pkgDir string, caches benchCaches) {
 	t.Helper()
 	marker := filepath.Join(filepath.Dir(pkgDir), ".bench-module-ready")
 	if _, err := os.Stat(marker); err == nil {
@@ -1216,7 +1264,7 @@ func importBenchDepFile(i int, variant string) string {
 	}
 }
 
-func writeImportBenchWireFile(t *testing.T, root string, imports int, wireModulePath string) {
+func writeImportBenchWireFile(t testing.TB, root string, imports int, wireModulePath string) {
 	t.Helper()
 	path := filepath.Join(root, "app", "wire.go")
 	if err := os.WriteFile(path, []byte(importBenchWireFile(imports, wireModulePath)), 0o644); err != nil {
@@ -1224,7 +1272,7 @@ func writeImportBenchWireFile(t *testing.T, root string, imports int, wireModule
 	}
 }
 
-func writeImportBenchDepFile(t *testing.T, root string, index int, variant string) {
+func writeImportBenchDepFile(t testing.TB, root string, index int, variant string) {
 	t.Helper()
 	path := filepath.Join(root, fmt.Sprintf("dep%04d", index), "dep.go")
 	if err := os.WriteFile(path, []byte(importBenchDepFile(index, variant)), 0o644); err != nil {
