@@ -1697,22 +1697,10 @@ func processFieldsOf(fset *token.FileSet, info *types.Info, call *ast.CallExpr) 
 		return nil, notePosition(fset.Position(call.Pos()),
 			fmt.Errorf(firstArgReqFormat, types.TypeString(structType, nil)))
 	}
-
-	var struc *types.Struct
-	isPtrToStruct := false
-	switch t := structPtr.Elem().Underlying().(type) {
-	case *types.Pointer:
-		struc, ok = t.Elem().Underlying().(*types.Struct)
-		if !ok {
-			return nil, notePosition(fset.Position(call.Pos()),
-				fmt.Errorf(firstArgReqFormat, types.TypeString(struc, nil)))
-		}
-		isPtrToStruct = true
-	case *types.Struct:
-		struc = t
-	default:
+	struc, isPtrToStruct, err := structFromFieldsParent(structPtr)
+	if err != nil {
 		return nil, notePosition(fset.Position(call.Pos()),
-			fmt.Errorf(firstArgReqFormat, types.TypeString(t, nil)))
+			fmt.Errorf(firstArgReqFormat, types.TypeString(structType, nil)))
 	}
 	if struc.NumFields() < len(call.Args)-1 {
 		return nil, notePosition(fset.Position(call.Pos()),
