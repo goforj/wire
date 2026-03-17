@@ -18,7 +18,7 @@ Usage:
 Commands:
   table      Print the 10/100/1000 import stock-vs-current benchmark table.
   scenarios  Print the stock-vs-current change-type scenario table.
-             Optional profiles: local, local-high, external.
+             Optional profiles: local, local-high, external-low, external-high.
   breakdown  Print a focused 1000-import cold/unchanged breakdown.
 EOF
 }

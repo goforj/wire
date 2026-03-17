@@ -143,8 +143,8 @@ func TestPrintImportScenarioBenchmarkTable(t *testing.T) {
 	profiles := []appBenchProfile{
 		{localPkgs: 10, depPkgs: 25, label: "local"},
 		{localPkgs: 10, depPkgs: 1000, label: "local-high"},
-		{localPkgs: 10, depPkgs: 25, external: true, label: "external"},
-		{localPkgs: 10, depPkgs: 100, external: true, label: "external"},
+		{localPkgs: 10, depPkgs: 25, external: true, label: "external-low"},
+		{localPkgs: 10, depPkgs: 100, external: true, label: "external-high"},
 	}
 	if filter := os.Getenv(importBenchProfile); filter != "" {
 		filtered := make([]appBenchProfile, 0, len(profiles))
