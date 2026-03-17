@@ -681,11 +681,11 @@ func (oc *objectCache) semanticImportedSet(importPath, name string) (*ProviderSe
 func (oc *objectCache) semanticBinding(item semanticcache.ProviderSetItemArtifact) (*IfaceBinding, []error) {
 	iface, err := oc.semanticType(item.Type)
 	if err != nil {
-		return nil, []error{err}
+		return nil, semanticErrors(err)
 	}
 	provided, err := oc.semanticType(item.Type2)
 	if err != nil {
-		return nil, []error{err}
+		return nil, semanticErrors(err)
 	}
 	return &IfaceBinding{
 		Iface:    iface,
@@ -696,11 +696,11 @@ func (oc *objectCache) semanticBinding(item semanticcache.ProviderSetItemArtifac
 func (oc *objectCache) semanticStructProvider(item semanticcache.ProviderSetItemArtifact) (*Provider, []error) {
 	typeName, err := oc.semanticTypeName(item.Type)
 	if err != nil {
-		return nil, []error{err}
+		return nil, semanticErrors(err)
 	}
 	out, st, ok := namedStructType(typeName)
 	if !ok {
-		return nil, []error{fmt.Errorf("%s.%s does not name a struct", item.Type.ImportPath, item.Type.Name)}
+		return nil, semanticErrors(fmt.Errorf("%s.%s does not name a struct", item.Type.ImportPath, item.Type.Name))
 	}
 	provider := newStructProvider(typeName, typeAndPointer(out))
 	args, errs := semanticStructProviderInputs(st, item)
@@ -714,17 +714,17 @@ func (oc *objectCache) semanticStructProvider(item semanticcache.ProviderSetItem
 func (oc *objectCache) semanticFields(item semanticcache.ProviderSetItemArtifact) ([]*Field, []error) {
 	parent, err := oc.semanticType(item.Type)
 	if err != nil {
-		return nil, []error{err}
+		return nil, semanticErrors(err)
 	}
 	structType, ptrToField, err := structFromFieldsParent(parent)
 	if err != nil {
-		return nil, []error{err}
+		return nil, semanticErrors(err)
 	}
 	fields := make([]*Field, 0, len(item.FieldNames))
 	for _, fieldName := range item.FieldNames {
 		v, err := requiredStructField(structType, fieldName)
 		if err != nil {
-			return nil, []error{err}
+			return nil, semanticErrors(err)
 		}
 		fields = append(fields, newField(parent, v, ptrToField))
 	}
@@ -763,6 +763,10 @@ func providerInputsForVars(vars []*types.Var) []ProviderInput {
 		args = append(args, providerInputForVar(v))
 	}
 	return args
+}
+
+func semanticErrors(err error) []error {
+	return []error{err}
 }
 
 func providerInputForVar(v *types.Var) ProviderInput {
