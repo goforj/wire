@@ -174,11 +174,11 @@ func validateTouchedPackagesCustom(ctx context.Context, req TouchedValidationReq
 
 func loadRootGraphCustom(ctx context.Context, req RootLoadRequest) (*RootLoadResult, error) {
 	meta, discoveryDuration, err := loadCustomMeta(ctx, goListRequest{
-		WD:       req.WD,
-		Env:      req.Env,
-		Tags:     req.Tags,
-		Patterns: req.Patterns,
-		NeedDeps: req.NeedDeps,
+		WD:           req.WD,
+		Env:          req.Env,
+		Tags:         req.Tags,
+		Patterns:     req.Patterns,
+		NeedDeps:     req.NeedDeps,
 		SkipCompiled: true,
 	})
 	if err != nil {

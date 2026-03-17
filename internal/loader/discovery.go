@@ -27,11 +27,11 @@ import (
 )
 
 type goListRequest struct {
-	WD       string
-	Env      []string
-	Tags     string
-	Patterns []string
-	NeedDeps bool
+	WD           string
+	Env          []string
+	Tags         string
+	Patterns     []string
+	NeedDeps     bool
 	SkipCompiled bool
 }
 

@@ -127,13 +127,13 @@ func discoveryCachePath(req goListRequest) (string, error) {
 		return "", err
 	}
 	sumReq := struct {
-		Version  int
-		WD       string
-		Tags     string
-		Patterns []string
-		NeedDeps bool
+		Version      int
+		WD           string
+		Tags         string
+		Patterns     []string
+		NeedDeps     bool
 		SkipCompiled bool
-		Go       string
+		Go           string
 	}{
 		Version:      discoveryCacheVersion,
 		WD:           canonicalLoaderPath(req.WD),
