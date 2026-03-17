@@ -539,7 +539,8 @@ func (oc *objectCache) get(obj types.Object) (val interface{}, errs []error) {
 	case *types.Var:
 		spec := oc.varDecl(obj)
 		if isProviderSetType(obj.Type()) {
-			if pset, ok, errs := oc.providerSetForVar(obj, spec); ok {
+			if spec == nil {
+				pset, _, errs := oc.semanticProviderSet(obj)
 				return pset, errs
 			}
 		}
@@ -559,13 +560,6 @@ func (oc *objectCache) get(obj types.Object) (val interface{}, errs []error) {
 	default:
 		return nil, []error{fmt.Errorf("%v is not a provider or a provider set", obj)}
 	}
-}
-
-func (oc *objectCache) providerSetForVar(obj *types.Var, spec *ast.ValueSpec) (*ProviderSet, bool, []error) {
-	if spec != nil {
-		return nil, false, nil
-	}
-	return oc.semanticProviderSet(obj)
 }
 
 func (oc *objectCache) semanticProviderSet(obj *types.Var) (*ProviderSet, bool, []error) {

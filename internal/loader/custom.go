@@ -192,10 +192,17 @@ func loadRootGraphCustom(ctx context.Context, req RootLoadRequest) (*RootLoadRes
 		return nil, unsupportedError{reason: "empty go list result"}
 	}
 	pkgs := packageStubGraphFromMeta(nil, meta)
-	roots := rootPackagesFromMeta(meta, pkgs)
+	rootPaths := nonDepRootImportPaths(meta)
+	roots := make([]*packages.Package, 0, len(rootPaths))
+	for _, path := range rootPaths {
+		if pkg := pkgs[path]; pkg != nil {
+			roots = append(roots, pkg)
+		}
+	}
 	if len(roots) == 0 {
 		return nil, unsupportedError{reason: "no root packages from metadata"}
 	}
+	sort.Slice(roots, func(i, j int) bool { return roots[i].PkgPath < roots[j].PkgPath })
 	return &RootLoadResult{
 		Packages:  roots,
 		Backend:   ModeCustom,
@@ -270,12 +277,15 @@ func loadPackagesCustom(ctx context.Context, req PackageLoadRequest) (*PackageLo
 	if fset == nil {
 		fset = token.NewFileSet()
 	}
-	targets := rootTargetSet(meta)
+	rootPaths := nonDepRootImportPaths(meta)
+	targets := make(map[string]struct{}, len(rootPaths))
+	for _, path := range rootPaths {
+		targets[path] = struct{}{}
+	}
 	if len(targets) == 0 {
 		return nil, unsupportedError{reason: "no root packages from metadata"}
 	}
 	l := newCustomTypedGraphLoader(ctx, req.WD, req.Env, fset, meta, targets, req.ParseFile, discoveryDuration)
-	rootPaths := nonDepRootImportPaths(meta)
 	roots, err := loadCustomRootPackages(l, rootPaths)
 	if err != nil {
 		return nil, err
@@ -1281,26 +1291,6 @@ func nonDepRootImportPaths(meta map[string]*packageMeta) []string {
 	}
 	sort.Strings(paths)
 	return paths
-}
-
-func rootTargetSet(meta map[string]*packageMeta) map[string]struct{} {
-	targets := make(map[string]struct{})
-	for _, path := range nonDepRootImportPaths(meta) {
-		targets[path] = struct{}{}
-	}
-	return targets
-}
-
-func rootPackagesFromMeta(meta map[string]*packageMeta, pkgs map[string]*packages.Package) []*packages.Package {
-	rootPaths := nonDepRootImportPaths(meta)
-	roots := make([]*packages.Package, 0, len(rootPaths))
-	for _, path := range rootPaths {
-		if pkg := pkgs[path]; pkg != nil {
-			roots = append(roots, pkg)
-		}
-	}
-	sort.Slice(roots, func(i, j int) bool { return roots[i].PkgPath < roots[j].PkgPath })
-	return roots
 }
 
 func logTypedLoadStats(ctx context.Context, mode string, stats typedLoadStats) {
