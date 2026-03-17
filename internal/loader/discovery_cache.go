@@ -54,14 +54,14 @@ func readDiscoveryCache(req goListRequest) (map[string]*packageMeta, bool) {
 	if !validateDiscoveryCacheEntry(entry) {
 		return nil, false
 	}
-	return clonePackageMetaMap(entry.Meta), true
+	return entry.Meta, true
 }
 
 func buildDiscoveryCacheEntry(req goListRequest, meta map[string]*packageMeta) (*discoveryCacheEntry, error) {
 	workspace := detectModuleRoot(req.WD)
 	entry := &discoveryCacheEntry{
 		Version: discoveryCacheVersion,
-		Meta:    clonePackageMetaMap(meta),
+		Meta:    meta,
 	}
 	global := []string{
 		filepath.Join(workspace, "go.mod"),
@@ -284,46 +284,4 @@ func hashGob(v interface{}) (string, error) {
 	}
 	sum := sha256.Sum256(buf.Bytes())
 	return hex.EncodeToString(sum[:]), nil
-}
-
-func clonePackageMetaMap(in map[string]*packageMeta) map[string]*packageMeta {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]*packageMeta, len(in))
-	for k, v := range in {
-		if v == nil {
-			continue
-		}
-		cp := *v
-		cp.GoFiles = append([]string(nil), v.GoFiles...)
-		cp.CompiledGoFiles = append([]string(nil), v.CompiledGoFiles...)
-		cp.Imports = append([]string(nil), v.Imports...)
-		if v.ImportMap != nil {
-			cp.ImportMap = make(map[string]string, len(v.ImportMap))
-			for mk, mv := range v.ImportMap {
-				cp.ImportMap[mk] = mv
-			}
-		}
-		if v.Module != nil {
-			cp.Module = cloneGoListModule(v.Module)
-		}
-		if v.Error != nil {
-			errCopy := *v.Error
-			cp.Error = &errCopy
-		}
-		out[k] = &cp
-	}
-	return out
-}
-
-func cloneGoListModule(in *goListModule) *goListModule {
-	if in == nil {
-		return nil
-	}
-	cp := *in
-	if in.Replace != nil {
-		cp.Replace = cloneGoListModule(in.Replace)
-	}
-	return &cp
 }
