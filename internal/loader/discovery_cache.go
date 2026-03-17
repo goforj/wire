@@ -15,11 +15,6 @@ import (
 
 type discoveryCacheEntry struct {
 	Version   int
-	WD        string
-	Tags      string
-	Patterns  []string
-	NeedDeps  bool
-	Workspace string
 	Meta      map[string]*packageMeta
 	Global    []discoveryFileMeta
 	LocalPkgs []discoveryLocalPackage
@@ -49,6 +44,8 @@ type discoveryFileFingerprint struct {
 	Hash string
 }
 
+const discoveryCacheVersion = 3
+
 func readDiscoveryCache(req goListRequest) (map[string]*packageMeta, bool) {
 	entry, err := loadDiscoveryCacheEntry(req)
 	if err != nil || entry == nil {
@@ -63,13 +60,8 @@ func readDiscoveryCache(req goListRequest) (map[string]*packageMeta, bool) {
 func buildDiscoveryCacheEntry(req goListRequest, meta map[string]*packageMeta) (*discoveryCacheEntry, error) {
 	workspace := detectModuleRoot(req.WD)
 	entry := &discoveryCacheEntry{
-		Version:   3,
-		WD:        canonicalLoaderPath(req.WD),
-		Tags:      req.Tags,
-		Patterns:  append([]string(nil), req.Patterns...),
-		NeedDeps:  req.NeedDeps,
-		Workspace: workspace,
-		Meta:      clonePackageMetaMap(meta),
+		Version: discoveryCacheVersion,
+		Meta:    clonePackageMetaMap(meta),
 	}
 	global := []string{
 		filepath.Join(workspace, "go.mod"),
@@ -108,7 +100,7 @@ func buildDiscoveryCacheEntry(req goListRequest, meta map[string]*packageMeta) (
 }
 
 func validateDiscoveryCacheEntry(entry *discoveryCacheEntry) bool {
-	if entry == nil || entry.Version != 3 {
+	if entry == nil || entry.Version != discoveryCacheVersion {
 		return false
 	}
 	for _, fm := range entry.Global {
@@ -142,7 +134,7 @@ func discoveryCachePath(req goListRequest) (string, error) {
 		NeedDeps bool
 		Go       string
 	}{
-		Version:  3,
+		Version:  discoveryCacheVersion,
 		WD:       canonicalLoaderPath(req.WD),
 		Tags:     req.Tags,
 		Patterns: append([]string(nil), req.Patterns...),
