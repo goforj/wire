@@ -877,6 +877,15 @@ func requiredStructField(st *types.Struct, name string) (*types.Var, error) {
 	return v, nil
 }
 
+func lookupQuotedStructField(st *types.Struct, quotedName string) (*types.Var, int) {
+	for i := 0; i < st.NumFields(); i++ {
+		if strings.EqualFold(strconv.Quote(st.Field(i).Name()), quotedName) {
+			return st.Field(i), i
+		}
+	}
+	return nil, -1
+}
+
 func (oc *objectCache) semanticArtifact(pkg *packages.Package) *semanticcache.PackageArtifact {
 	if pkg == nil {
 		return nil
@@ -1731,13 +1740,12 @@ func checkField(f ast.Expr, st *types.Struct) (*types.Var, error) {
 	if !ok {
 		return nil, fmt.Errorf("%v must be a string with the field name", f)
 	}
-	for i := 0; i < st.NumFields(); i++ {
-		if strings.EqualFold(strconv.Quote(st.Field(i).Name()), b.Value) {
-			if isPrevented(st.Tag(i)) {
-				return nil, fmt.Errorf("%s is prevented from injecting by wire", b.Value)
-			}
-			return st.Field(i), nil
+	v, i := lookupQuotedStructField(st, b.Value)
+	if v != nil {
+		if isPrevented(st.Tag(i)) {
+			return nil, fmt.Errorf("%s is prevented from injecting by wire", b.Value)
 		}
+		return v, nil
 	}
 	return nil, fmt.Errorf("%s is not a field of %s", b.Value, st.String())
 }
