@@ -735,13 +735,7 @@ func (oc *objectCache) semanticFields(item semanticcache.ProviderSetItemArtifact
 		if err != nil {
 			return nil, []error{err}
 		}
-		fields = append(fields, &Field{
-			Parent: parent,
-			Name:   v.Name(),
-			Pkg:    v.Pkg(),
-			Pos:    v.Pos(),
-			Out:    fieldOutputTypes(v.Type(), ptrToField),
-		})
+		fields = append(fields, newField(parent, v, ptrToField))
 	}
 	return fields, nil
 }
@@ -784,6 +778,16 @@ func providerInputForVar(v *types.Var) ProviderInput {
 	return ProviderInput{
 		Type:      v.Type(),
 		FieldName: v.Name(),
+	}
+}
+
+func newField(parent types.Type, v *types.Var, includePointer bool) *Field {
+	return &Field{
+		Parent: parent,
+		Name:   v.Name(),
+		Pkg:    v.Pkg(),
+		Pos:    v.Pos(),
+		Out:    fieldOutputTypes(v.Type(), includePointer),
 	}
 }
 
@@ -1713,13 +1717,7 @@ func processFieldsOf(fset *token.FileSet, info *types.Info, call *ast.CallExpr) 
 		if err != nil {
 			return nil, notePosition(fset.Position(call.Pos()), err)
 		}
-		fields = append(fields, &Field{
-			Parent: structPtr.Elem(),
-			Name:   v.Name(),
-			Pkg:    v.Pkg(),
-			Pos:    v.Pos(),
-			Out:    fieldOutputTypes(v.Type(), isPtrToStruct),
-		})
+		fields = append(fields, newField(structPtr.Elem(), v, isPtrToStruct))
 	}
 	return fields, nil
 }
