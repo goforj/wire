@@ -748,18 +748,7 @@ func (oc *objectCache) semanticFields(item semanticcache.ProviderSetItemArtifact
 
 func semanticStructProviderInputs(st *types.Struct, item semanticcache.ProviderSetItemArtifact) ([]ProviderInput, []error) {
 	if item.AllFields {
-		args := make([]ProviderInput, 0, st.NumFields())
-		for i := 0; i < st.NumFields(); i++ {
-			if isPrevented(st.Tag(i)) {
-				continue
-			}
-			f := st.Field(i)
-			args = append(args, ProviderInput{
-				Type:      f.Type(),
-				FieldName: f.Name(),
-			})
-		}
-		return args, nil
+		return providerInputsForAllowedStructFields(st), nil
 	}
 	args := make([]ProviderInput, 0, len(item.FieldNames))
 	for _, fieldName := range item.FieldNames {
@@ -767,12 +756,27 @@ func semanticStructProviderInputs(st *types.Struct, item semanticcache.ProviderS
 		if err != nil {
 			return nil, []error{fmt.Errorf("field %q not found in %s.%s", fieldName, item.Type.ImportPath, item.Type.Name)}
 		}
-		args = append(args, ProviderInput{
-			Type:      f.Type(),
-			FieldName: f.Name(),
-		})
+		args = append(args, providerInputForVar(f))
 	}
 	return args, nil
+}
+
+func providerInputsForAllowedStructFields(st *types.Struct) []ProviderInput {
+	args := make([]ProviderInput, 0, st.NumFields())
+	for i := 0; i < st.NumFields(); i++ {
+		if isPrevented(st.Tag(i)) {
+			continue
+		}
+		args = append(args, providerInputForVar(st.Field(i)))
+	}
+	return args
+}
+
+func providerInputForVar(v *types.Var) ProviderInput {
+	return ProviderInput{
+		Type:      v.Type(),
+		FieldName: v.Name(),
+	}
 }
 
 func typeAndPointer(typ types.Type) []types.Type {
@@ -1497,16 +1501,7 @@ func processStructProvider(fset *token.FileSet, info *types.Info, call *ast.Call
 	typeName := qualifiedIdentObject(info, stExpr.Args[0]) // should be either an identifier or selector
 	provider := newStructProvider(typeName, []types.Type{structPtr.Elem(), structPtr})
 	if allFields(call) {
-		for i := 0; i < st.NumFields(); i++ {
-			if isPrevented(st.Tag(i)) {
-				continue
-			}
-			f := st.Field(i)
-			provider.Args = append(provider.Args, ProviderInput{
-				Type:      f.Type(),
-				FieldName: f.Name(),
-			})
-		}
+		provider.Args = providerInputsForAllowedStructFields(st)
 	} else {
 		provider.Args = make([]ProviderInput, len(call.Args)-1)
 		for i := 1; i < len(call.Args); i++ {
@@ -1514,10 +1509,7 @@ func processStructProvider(fset *token.FileSet, info *types.Info, call *ast.Call
 			if err != nil {
 				return nil, notePosition(fset.Position(call.Pos()), err)
 			}
-			provider.Args[i-1] = ProviderInput{
-				Type:      v.Type(),
-				FieldName: v.Name(),
-			}
+			provider.Args[i-1] = providerInputForVar(v)
 		}
 	}
 	for i := 0; i < len(provider.Args); i++ {
