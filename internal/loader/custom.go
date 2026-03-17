@@ -179,6 +179,7 @@ func loadRootGraphCustom(ctx context.Context, req RootLoadRequest) (*RootLoadRes
 		Tags:     req.Tags,
 		Patterns: req.Patterns,
 		NeedDeps: req.NeedDeps,
+		SkipCompiled: true,
 	})
 	if err != nil {
 		return nil, err
@@ -230,13 +231,22 @@ func loadTypedPackageGraphCustom(ctx context.Context, req LazyLoadRequest) (*Laz
 }
 
 func loadPackagesCustom(ctx context.Context, req PackageLoadRequest) (*PackageLoadResult, error) {
-	meta, discoveryDuration, err := loadCustomMeta(ctx, goListRequest{
-		WD:       req.WD,
-		Env:      req.Env,
-		Tags:     req.Tags,
-		Patterns: req.Patterns,
-		NeedDeps: true,
-	})
+	var (
+		meta              map[string]*packageMeta
+		discoveryDuration time.Duration
+		err               error
+	)
+	if req.Discovery != nil && len(req.Discovery.meta) > 0 {
+		meta = req.Discovery.meta
+	} else {
+		meta, discoveryDuration, err = loadCustomMeta(ctx, goListRequest{
+			WD:       req.WD,
+			Env:      req.Env,
+			Tags:     req.Tags,
+			Patterns: req.Patterns,
+			NeedDeps: true,
+		})
+	}
 	if err != nil {
 		return nil, err
 	}

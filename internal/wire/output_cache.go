@@ -32,10 +32,10 @@ type outputCacheCandidate struct {
 	outputPath string
 }
 
-func prepareGenerateOutputCache(ctx context.Context, wd string, env []string, patterns []string, opts *GenerateOptions) (map[string]outputCacheCandidate, []GenerateResult, bool) {
+func prepareGenerateOutputCache(ctx context.Context, wd string, env []string, patterns []string, opts *GenerateOptions) (map[string]outputCacheCandidate, []GenerateResult, *loader.DiscoverySnapshot, bool) {
 	if !outputCacheEnabled(ctx, wd, env) {
 		debugf(ctx, "generate.output_cache=disabled")
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	rootResult, err := loader.New().LoadRootGraph(withLoaderTiming(ctx), loader.RootLoadRequest{
 		WD:       wd,
@@ -51,7 +51,7 @@ func prepareGenerateOutputCache(ctx context.Context, wd string, env []string, pa
 		} else {
 			debugf(ctx, "generate.output_cache=no_roots")
 		}
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	candidates := make(map[string]outputCacheCandidate, len(rootResult.Packages))
 	results := make([]GenerateResult, 0, len(rootResult.Packages))
@@ -59,17 +59,17 @@ func prepareGenerateOutputCache(ctx context.Context, wd string, env []string, pa
 		outDir, err := detectOutputDir(pkg.GoFiles)
 		if err != nil {
 			debugf(ctx, "generate.output_cache=bad_output_dir")
-			return candidates, nil, false
+			return candidates, nil, rootResult.Discovery, false
 		}
 		key, err := outputCacheKey(wd, opts, pkg)
 		if err != nil {
 			debugf(ctx, "generate.output_cache=key_error")
-			return candidates, nil, false
+			return candidates, nil, rootResult.Discovery, false
 		}
 		path, err := outputCachePath(env, key)
 		if err != nil {
 			debugf(ctx, "generate.output_cache=path_error")
-			return candidates, nil, false
+			return candidates, nil, rootResult.Discovery, false
 		}
 		candidates[pkg.PkgPath] = outputCacheCandidate{
 			path:       path,
@@ -78,7 +78,7 @@ func prepareGenerateOutputCache(ctx context.Context, wd string, env []string, pa
 		entry, ok := readOutputCache(path)
 		if !ok {
 			debugf(ctx, "generate.output_cache=miss")
-			return candidates, nil, false
+			return candidates, nil, rootResult.Discovery, false
 		}
 		results = append(results, GenerateResult{
 			PkgPath:    pkg.PkgPath,
@@ -87,7 +87,7 @@ func prepareGenerateOutputCache(ctx context.Context, wd string, env []string, pa
 		})
 	}
 	debugf(ctx, "generate.output_cache=hit")
-	return candidates, results, len(results) == len(rootResult.Packages)
+	return candidates, results, rootResult.Discovery, len(results) == len(rootResult.Packages)
 }
 
 func writeGenerateOutputCache(candidates map[string]outputCacheCandidate, generated []GenerateResult) {

@@ -102,12 +102,12 @@ func Generate(ctx context.Context, wd string, env []string, patterns []string, o
 	if opts == nil {
 		opts = &GenerateOptions{}
 	}
-	cacheCandidates, cached, ok := prepareGenerateOutputCache(ctx, wd, env, patterns, opts)
+	cacheCandidates, cached, discovery, ok := prepareGenerateOutputCache(ctx, wd, env, patterns, opts)
 	if ok {
 		return cached, nil
 	}
 	loadStart := time.Now()
-	pkgs, errs := load(ctx, wd, env, opts.Tags, patterns)
+	pkgs, errs := load(ctx, wd, env, opts.Tags, patterns, discovery)
 	logTiming(ctx, "generate.load", loadStart)
 	if len(errs) > 0 {
 		return nil, errs

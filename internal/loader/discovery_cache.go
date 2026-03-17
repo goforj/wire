@@ -132,14 +132,16 @@ func discoveryCachePath(req goListRequest) (string, error) {
 		Tags     string
 		Patterns []string
 		NeedDeps bool
+		SkipCompiled bool
 		Go       string
 	}{
-		Version:  discoveryCacheVersion,
-		WD:       canonicalLoaderPath(req.WD),
-		Tags:     req.Tags,
-		Patterns: append([]string(nil), req.Patterns...),
-		NeedDeps: req.NeedDeps,
-		Go:       runtime.Version(),
+		Version:      discoveryCacheVersion,
+		WD:           canonicalLoaderPath(req.WD),
+		Tags:         req.Tags,
+		Patterns:     append([]string(nil), req.Patterns...),
+		NeedDeps:     req.NeedDeps,
+		SkipCompiled: req.SkipCompiled,
+		Go:           runtime.Version(),
 	}
 	key, err := hashGob(sumReq)
 	if err != nil {

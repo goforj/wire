@@ -93,6 +93,7 @@ type PackageLoadRequest struct {
 	LoaderMode Mode
 	Fset       *token.FileSet
 	ParseFile  ParseFileFunc
+	Discovery  *DiscoverySnapshot
 }
 
 type PackageLoadResult struct {

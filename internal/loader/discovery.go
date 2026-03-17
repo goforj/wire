@@ -32,6 +32,7 @@ type goListRequest struct {
 	Tags     string
 	Patterns []string
 	NeedDeps bool
+	SkipCompiled bool
 }
 
 func runGoList(ctx context.Context, req goListRequest) (map[string]*packageMeta, error) {
@@ -46,7 +47,10 @@ func runGoList(ctx context.Context, req goListRequest) (map[string]*packageMeta,
 		return cached, nil
 	}
 	logDuration(ctx, "loader.discovery.cache_read.wall", time.Since(cacheReadStart))
-	args := []string{"list", "-json", "-e", "-compiled", "-export"}
+	args := []string{"list", "-json", "-e", "-export"}
+	if !req.SkipCompiled {
+		args = append(args, "-compiled")
+	}
 	if req.NeedDeps {
 		args = append(args, "-deps")
 	}

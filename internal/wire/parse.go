@@ -254,7 +254,7 @@ type Field struct {
 // takes precedence.
 func Load(ctx context.Context, wd string, env []string, tags string, patterns []string) (*Info, []error) {
 	loadStart := time.Now()
-	pkgs, errs := load(ctx, wd, env, tags, patterns)
+	pkgs, errs := load(ctx, wd, env, tags, patterns, nil)
 	logTiming(ctx, "load.packages", loadStart)
 	if len(errs) > 0 {
 		return nil, errs
@@ -361,7 +361,7 @@ func Load(ctx context.Context, wd string, env []string, tags string, patterns []
 // env is nil or empty, it is interpreted as an empty set of variables.
 // In case of duplicate environment variables, the last one in the list
 // takes precedence.
-func load(ctx context.Context, wd string, env []string, tags string, patterns []string) ([]*packages.Package, []error) {
+func load(ctx context.Context, wd string, env []string, tags string, patterns []string, discovery *loader.DiscoverySnapshot) ([]*packages.Package, []error) {
 	fset := token.NewFileSet()
 	loaderMode := effectiveLoaderMode(ctx, wd, env)
 	parseStats := &parseFileStats{}
@@ -374,6 +374,7 @@ func load(ctx context.Context, wd string, env []string, tags string, patterns []
 		Mode:       packages.LoadAllSyntax,
 		LoaderMode: loaderMode,
 		Fset:       fset,
+		Discovery:  discovery,
 		ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
 			start := time.Now()
 			file, err := parser.ParseFile(fset, filename, src, parser.ParseComments|parser.SkipObjectResolution)
