@@ -28,10 +28,11 @@ type discoveryLocalPackage struct {
 }
 
 type discoveryFileMeta struct {
-	Path    string
-	Size    int64
-	ModTime int64
-	IsDir   bool
+	Path        string
+	Size        int64
+	ModTime     int64  // deprecated: kept for gob compat, not used for matching
+	ContentHash string // sha256 of file content
+	IsDir       bool
 }
 
 type discoveryDirMeta struct {
@@ -44,7 +45,7 @@ type discoveryFileFingerprint struct {
 	Hash string
 }
 
-const discoveryCacheVersion = 3
+const discoveryCacheVersion = 4
 
 func readDiscoveryCache(req goListRequest) (map[string]*packageMeta, bool) {
 	entry, err := loadDiscoveryCacheEntry(req)
@@ -121,10 +122,16 @@ func validateDiscoveryCacheEntry(entry *discoveryCacheEntry) bool {
 	return true
 }
 
+const discoveryCacheDirEnv = "WIRE_DISCOVERY_CACHE_DIR"
+
 func discoveryCachePath(req goListRequest) (string, error) {
-	base, err := os.UserCacheDir()
-	if err != nil {
-		return "", err
+	dir := os.Getenv(discoveryCacheDirEnv)
+	if dir == "" {
+		base, err := os.UserCacheDir()
+		if err != nil {
+			return "", err
+		}
+		dir = filepath.Join(base, "wire", "discovery-cache")
 	}
 	sumReq := struct {
 		Version      int
@@ -147,7 +154,7 @@ func discoveryCachePath(req goListRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(base, "wire", "discovery-cache", key+".gob"), nil
+	return filepath.Join(dir, key+".gob"), nil
 }
 
 func loadDiscoveryCacheEntry(req goListRequest) (*discoveryCacheEntry, error) {
@@ -188,11 +195,19 @@ func statDiscoveryFile(path string) (discoveryFileMeta, bool) {
 	if err != nil {
 		return discoveryFileMeta{}, false
 	}
+	h := ""
+	if !info.IsDir() {
+		var err error
+		h, err = hashFileContent(path)
+		if err != nil {
+			return discoveryFileMeta{}, false
+		}
+	}
 	return discoveryFileMeta{
-		Path:    canonicalLoaderPath(path),
-		Size:    info.Size(),
-		ModTime: info.ModTime().UnixNano(),
-		IsDir:   info.IsDir(),
+		Path:        canonicalLoaderPath(path),
+		Size:        info.Size(),
+		ContentHash: h,
+		IsDir:       info.IsDir(),
 	}, true
 }
 
@@ -201,7 +216,7 @@ func matchesDiscoveryFile(fm discoveryFileMeta) bool {
 	if !ok {
 		return false
 	}
-	return cur.Size == fm.Size && cur.ModTime == fm.ModTime && cur.IsDir == fm.IsDir
+	return cur.ContentHash == fm.ContentHash && cur.IsDir == fm.IsDir
 }
 
 func statDiscoveryDir(path string) (discoveryDirMeta, bool) {
