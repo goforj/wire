@@ -26,11 +26,13 @@ import (
 	"runtime"
 
 	"golang.org/x/tools/go/gcexportdata"
+
+	"github.com/goforj/wire/internal/cachepaths"
 )
 
 const (
 	loaderArtifactEnv    = "WIRE_LOADER_ARTIFACTS"
-	loaderArtifactDirEnv = "WIRE_LOADER_ARTIFACT_DIR"
+	loaderArtifactDirEnv = cachepaths.LoaderArtifactDirEnv
 )
 
 func loaderArtifactEnabled(env []string) bool {
@@ -38,14 +40,7 @@ func loaderArtifactEnabled(env []string) bool {
 }
 
 func loaderArtifactDir(env []string) (string, error) {
-	if dir := envValue(env, loaderArtifactDirEnv); dir != "" {
-		return dir, nil
-	}
-	base, err := os.UserCacheDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(base, "wire", "loader-artifacts"), nil
+	return cachepaths.Dir(env, loaderArtifactDirEnv, "loader-artifacts")
 }
 
 func loaderArtifactPath(env []string, meta *packageMeta, isLocal bool) (string, error) {

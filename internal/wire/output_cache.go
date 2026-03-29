@@ -14,11 +14,12 @@ import (
 
 	"golang.org/x/tools/go/packages"
 
+	"github.com/goforj/wire/internal/cachepaths"
 	"github.com/goforj/wire/internal/loader"
 )
 
 const (
-	outputCacheDirEnv     = "WIRE_OUTPUT_CACHE_DIR"
+	outputCacheDirEnv     = cachepaths.OutputCacheDirEnv
 	outputCacheEnabledEnv = "WIRE_OUTPUT_CACHE"
 )
 
@@ -122,14 +123,7 @@ func outputCachePath(env []string, key string) (string, error) {
 }
 
 func outputCacheDir(env []string) (string, error) {
-	if dir := envValue(env, outputCacheDirEnv); dir != "" {
-		return dir, nil
-	}
-	base, err := os.UserCacheDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(base, "wire", "output-cache"), nil
+	return cachepaths.Dir(env, outputCacheDirEnv, "output-cache")
 }
 
 func readOutputCache(path string) (*outputCacheEntry, bool) {

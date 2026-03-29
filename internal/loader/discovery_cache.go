@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+
+	"github.com/goforj/wire/internal/cachepaths"
 )
 
 type discoveryCacheEntry struct {
@@ -122,16 +124,12 @@ func validateDiscoveryCacheEntry(entry *discoveryCacheEntry) bool {
 	return true
 }
 
-const discoveryCacheDirEnv = "WIRE_DISCOVERY_CACHE_DIR"
+const discoveryCacheDirEnv = cachepaths.DiscoveryCacheDirEnv
 
 func discoveryCachePath(req goListRequest) (string, error) {
-	dir := os.Getenv(discoveryCacheDirEnv)
-	if dir == "" {
-		base, err := os.UserCacheDir()
-		if err != nil {
-			return "", err
-		}
-		dir = filepath.Join(base, "wire", "discovery-cache")
+	dir, err := cachepaths.Dir(req.Env, discoveryCacheDirEnv, "discovery-cache")
+	if err != nil {
+		return "", err
 	}
 	sumReq := struct {
 		Version      int

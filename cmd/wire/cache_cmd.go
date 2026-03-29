@@ -25,15 +25,14 @@ import (
 	"strings"
 
 	"github.com/google/subcommands"
+
+	"github.com/goforj/wire/internal/cachepaths"
 )
 
 const (
-	loaderArtifactDirEnv = "WIRE_LOADER_ARTIFACT_DIR"
-	outputCacheDirEnv    = "WIRE_OUTPUT_CACHE_DIR"
-	semanticCacheDirEnv  = "WIRE_SEMANTIC_CACHE_DIR"
+	loaderArtifactDirEnv = cachepaths.LoaderArtifactDirEnv
+	outputCacheDirEnv    = cachepaths.OutputCacheDirEnv
 )
-
-var osUserCacheDir = os.UserCacheDir
 
 type cacheCmd struct {
 	clear bool
@@ -113,11 +112,11 @@ func (cmd *cacheCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...inter
 }
 
 func wireCacheRoot(env []string) (string, error) {
-	base, err := osUserCacheDir()
+	root, err := cachepaths.Root(env)
 	if err != nil {
 		return "", fmt.Errorf("resolve user cache dir: %w", err)
 	}
-	return filepath.Join(base, "wire"), nil
+	return root, nil
 }
 
 func clearWireCaches(env []string) ([]string, error) {
@@ -148,11 +147,11 @@ func clearWireCaches(env []string) ([]string, error) {
 }
 
 func wireCacheTargets(env []string, userCacheDir string) []cacheTarget {
-	baseWire := filepath.Join(userCacheDir, "wire")
+	baseWire := cachepaths.EnvValueDefault(env, cachepaths.BaseDirEnv, filepath.Join(userCacheDir, "wire"))
 	targets := []cacheTarget{
-		{name: "loader-artifacts", path: envValueDefault(env, loaderArtifactDirEnv, filepath.Join(baseWire, "loader-artifacts"))},
-		{name: "discovery-cache", path: filepath.Join(baseWire, "discovery-cache")},
-		{name: "output-cache", path: envValueDefault(env, outputCacheDirEnv, filepath.Join(baseWire, "output-cache"))},
+		{name: "loader-artifacts", path: cachepaths.EnvValueDefault(env, loaderArtifactDirEnv, filepath.Join(baseWire, "loader-artifacts"))},
+		{name: "discovery-cache", path: cachepaths.EnvValueDefault(env, cachepaths.DiscoveryCacheDirEnv, filepath.Join(baseWire, "discovery-cache"))},
+		{name: "output-cache", path: cachepaths.EnvValueDefault(env, outputCacheDirEnv, filepath.Join(baseWire, "output-cache"))},
 	}
 	seen := make(map[string]bool, len(targets))
 	deduped := make([]cacheTarget, 0, len(targets))
@@ -167,14 +166,4 @@ func wireCacheTargets(env []string, userCacheDir string) []cacheTarget {
 	}
 	sort.Slice(deduped, func(i, j int) bool { return deduped[i].name < deduped[j].name })
 	return deduped
-}
-
-func envValueDefault(env []string, key, fallback string) string {
-	for i := len(env) - 1; i >= 0; i-- {
-		parts := strings.SplitN(env[i], "=", 2)
-		if len(parts) == 2 && parts[0] == key && parts[1] != "" {
-			return parts[1]
-		}
-	}
-	return fallback
 }

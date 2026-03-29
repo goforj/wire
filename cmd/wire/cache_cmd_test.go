@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/goforj/wire/internal/cachepaths"
 )
 
 func TestWireCacheTargetsDefault(t *testing.T) {
@@ -26,9 +28,9 @@ func TestWireCacheTargetsDefault(t *testing.T) {
 
 func TestWireCacheRoot(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cache")
-	old := osUserCacheDir
-	osUserCacheDir = func() (string, error) { return base, nil }
-	defer func() { osUserCacheDir = old }()
+	old := cachepaths.UserCacheDir
+	cachepaths.UserCacheDir = func() (string, error) { return base, nil }
+	defer func() { cachepaths.UserCacheDir = old }()
 
 	got, err := wireCacheRoot(nil)
 	if err != nil {
@@ -44,13 +46,31 @@ func TestWireCacheTargetsRespectOverrides(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cache")
 	env := []string{
 		loaderArtifactDirEnv + "=" + filepath.Join(base, "loader"),
+		cachepaths.DiscoveryCacheDirEnv + "=" + filepath.Join(base, "discovery"),
 		outputCacheDirEnv + "=" + filepath.Join(base, "output"),
 	}
 	got := wireCacheTargets(env, base)
 	want := map[string]string{
-		"discovery-cache":  filepath.Join(base, "wire", "discovery-cache"),
+		"discovery-cache":  filepath.Join(base, "discovery"),
 		"loader-artifacts": filepath.Join(base, "loader"),
 		"output-cache":     filepath.Join(base, "output"),
+	}
+	for _, target := range got {
+		if target.path != want[target.name] {
+			t.Fatalf("%s path = %q, want %q", target.name, target.path, want[target.name])
+		}
+	}
+}
+
+func TestWireCacheTargetsRespectBaseDirOverride(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "cache")
+	root := filepath.Join(base, "wire-root")
+	env := []string{cachepaths.BaseDirEnv + "=" + root}
+	got := wireCacheTargets(env, base)
+	want := map[string]string{
+		"discovery-cache":  filepath.Join(root, "discovery-cache"),
+		"loader-artifacts": filepath.Join(root, "loader-artifacts"),
+		"output-cache":     filepath.Join(root, "output-cache"),
 	}
 	for _, target := range got {
 		if target.path != want[target.name] {
@@ -73,9 +93,9 @@ func TestClearWireCachesRemovesTargets(t *testing.T) {
 			t.Fatalf("WriteFile(%q): %v", target.path, err)
 		}
 	}
-	old := osUserCacheDir
-	osUserCacheDir = func() (string, error) { return base, nil }
-	defer func() { osUserCacheDir = old }()
+	old := cachepaths.UserCacheDir
+	cachepaths.UserCacheDir = func() (string, error) { return base, nil }
+	defer func() { cachepaths.UserCacheDir = old }()
 
 	cleared, err := clearWireCaches(env)
 	if err != nil {
