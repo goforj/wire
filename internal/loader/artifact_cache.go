@@ -20,10 +20,10 @@ import (
 	"encoding/hex"
 	"go/token"
 	"go/types"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 
 	"golang.org/x/tools/go/gcexportdata"
 )
@@ -62,7 +62,7 @@ func loaderArtifactPath(env []string, meta *packageMeta, isLocal bool) (string, 
 
 func loaderArtifactKey(meta *packageMeta, isLocal bool) (string, error) {
 	sum := sha256.New()
-	sum.Write([]byte("wire-loader-artifact-v3\n"))
+	sum.Write([]byte("wire-loader-artifact-v4\n"))
 	sum.Write([]byte(runtime.Version()))
 	sum.Write([]byte{'\n'})
 	sum.Write([]byte(meta.ImportPath))
@@ -73,26 +73,15 @@ func loaderArtifactKey(meta *packageMeta, isLocal bool) (string, error) {
 		sum.Write([]byte(meta.Export))
 		sum.Write([]byte{'\n'})
 		if meta.Export != "" {
-			info, err := os.Stat(meta.Export)
+			h, err := hashFileContent(meta.Export)
 			if err != nil {
 				return "", err
 			}
-			sum.Write([]byte(strconv.FormatInt(info.Size(), 10)))
-			sum.Write([]byte{'\n'})
-			sum.Write([]byte(strconv.FormatInt(info.ModTime().UnixNano(), 10)))
+			sum.Write([]byte(h))
 			sum.Write([]byte{'\n'})
 		} else {
-			for _, name := range metaFiles(meta) {
-				info, err := os.Stat(name)
-				if err != nil {
-					return "", err
-				}
-				sum.Write([]byte(name))
-				sum.Write([]byte{'\n'})
-				sum.Write([]byte(strconv.FormatInt(info.Size(), 10)))
-				sum.Write([]byte{'\n'})
-				sum.Write([]byte(strconv.FormatInt(info.ModTime().UnixNano(), 10)))
-				sum.Write([]byte{'\n'})
+			if err := hashMetaFiles(sum, metaFiles(meta)); err != nil {
+				return "", err
 			}
 		}
 		if meta.Error != nil {
@@ -101,19 +90,35 @@ func loaderArtifactKey(meta *packageMeta, isLocal bool) (string, error) {
 		}
 		return hex.EncodeToString(sum.Sum(nil)), nil
 	}
-	for _, name := range metaFiles(meta) {
-		info, err := os.Stat(name)
-		if err != nil {
-			return "", err
-		}
-		sum.Write([]byte(name))
-		sum.Write([]byte{'\n'})
-		sum.Write([]byte(strconv.FormatInt(info.Size(), 10)))
-		sum.Write([]byte{'\n'})
-		sum.Write([]byte(strconv.FormatInt(info.ModTime().UnixNano(), 10)))
-		sum.Write([]byte{'\n'})
+	if err := hashMetaFiles(sum, metaFiles(meta)); err != nil {
+		return "", err
 	}
 	return hex.EncodeToString(sum.Sum(nil)), nil
+}
+
+// hashFileContent returns the hex-encoded SHA-256 of the file content.
+func hashFileContent(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:]), nil
+}
+
+// hashMetaFiles writes content-based hashes for each file into sum.
+func hashMetaFiles(sum io.Writer, names []string) error {
+	for _, name := range names {
+		sum.Write([]byte(name))
+		sum.Write([]byte{'\n'})
+		h, err := hashFileContent(name)
+		if err != nil {
+			return err
+		}
+		sum.Write([]byte(h))
+		sum.Write([]byte{'\n'})
+	}
+	return nil
 }
 
 func readLoaderArtifact(path string, fset *token.FileSet, imports map[string]*types.Package, pkgPath string) (*types.Package, error) {
