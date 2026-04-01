@@ -52,6 +52,10 @@ type call struct {
 	pkg  *types.Package
 	name string
 
+	// methodExprRecv is the receiver type for a method expression provider.
+	// It is nil for package-level function providers.
+	methodExprRecv types.Type
+
 	// args is a list of arguments to call the provider with. Each element is:
 	// a) one of the givens (args[i] < len(given)),
 	// b) the result of a previous provider call (args[i] >= len(given))
@@ -196,16 +200,17 @@ dfs:
 				}
 			}
 			calls = append(calls, call{
-				kind:       kind,
-				pkg:        p.Pkg,
-				name:       p.Name,
-				args:       args,
-				varargs:    p.Varargs,
-				fieldNames: fieldNames,
-				ins:        ins,
-				out:        curr.t,
-				hasCleanup: p.HasCleanup,
-				hasErr:     p.HasErr,
+				kind:           kind,
+				pkg:            p.Pkg,
+				name:           p.Name,
+				methodExprRecv: p.MethodExprRecv,
+				args:           args,
+				varargs:        p.Varargs,
+				fieldNames:     fieldNames,
+				ins:            ins,
+				out:            curr.t,
+				hasCleanup:     p.HasCleanup,
+				hasErr:         p.HasErr,
 			})
 		case pv.IsValue():
 			v := pv.Value()
