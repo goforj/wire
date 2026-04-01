@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/tools/go/packages"
 
@@ -56,17 +56,20 @@ func prepareGenerateOutputCache(ctx context.Context, wd string, env []string, pa
 	}
 	candidates := make(map[string]outputCacheCandidate, len(rootResult.Packages))
 	results := make([]GenerateResult, 0, len(rootResult.Packages))
+	fhc := newFileHashCache()
+	allHit := true
 	for _, pkg := range rootResult.Packages {
 		outDir, err := detectOutputDir(pkg.GoFiles)
 		if err != nil {
 			debugf(ctx, "generate.output_cache=bad_output_dir")
 			return candidates, nil, rootResult.Discovery, false
 		}
-		key, err := outputCacheKey(wd, opts, pkg)
+		key, err := outputCacheKey(wd, opts, pkg, fhc)
 		if err != nil {
-			debugf(ctx, "generate.output_cache=key_error")
+			debugf(ctx, "generate.output_cache=key_error pkg=%s err=%v", pkg.PkgPath, err)
 			return candidates, nil, rootResult.Discovery, false
 		}
+		debugf(ctx, "generate.output_cache.key pkg=%s key=%s reachable=%d", pkg.PkgPath, key, len(reachablePackages(pkg)))
 		path, err := outputCachePath(env, key)
 		if err != nil {
 			debugf(ctx, "generate.output_cache=path_error")
@@ -78,8 +81,9 @@ func prepareGenerateOutputCache(ctx context.Context, wd string, env []string, pa
 		}
 		entry, ok := readOutputCache(path)
 		if !ok {
-			debugf(ctx, "generate.output_cache=miss")
-			return candidates, nil, rootResult.Discovery, false
+			debugf(ctx, "generate.output_cache=miss pkg=%s", pkg.PkgPath)
+			allHit = false
+			continue
 		}
 		results = append(results, GenerateResult{
 			PkgPath:    pkg.PkgPath,
@@ -87,8 +91,12 @@ func prepareGenerateOutputCache(ctx context.Context, wd string, env []string, pa
 			Content:    entry.Content,
 		})
 	}
-	debugf(ctx, "generate.output_cache=hit")
-	return candidates, results, rootResult.Discovery, len(results) == len(rootResult.Packages)
+	if allHit {
+		debugf(ctx, "generate.output_cache=hit")
+		return candidates, results, rootResult.Discovery, true
+	}
+	debugf(ctx, "generate.output_cache=partial_miss hit=%d total=%d", len(results), len(rootResult.Packages))
+	return candidates, nil, rootResult.Discovery, false
 }
 
 func writeGenerateOutputCache(candidates map[string]outputCacheCandidate, generated []GenerateResult) {
@@ -154,9 +162,42 @@ func writeOutputCache(path string, entry *outputCacheEntry) error {
 	return gob.NewEncoder(f).Encode(entry)
 }
 
-func outputCacheKey(wd string, opts *GenerateOptions, root *packages.Package) (string, error) {
+// fileHashCache memoizes file content hashes across multiple outputCacheKey calls
+// within a single wire invocation. This avoids re-reading and re-hashing the same
+// files when multiple targets share overlapping dependency graphs.
+type fileHashCache struct {
+	mu     sync.Mutex
+	hashes map[string]string
+}
+
+func newFileHashCache() *fileHashCache {
+	return &fileHashCache{hashes: make(map[string]string)}
+}
+
+func (c *fileHashCache) hash(path string) (string, error) {
+	c.mu.Lock()
+	if h, ok := c.hashes[path]; ok {
+		c.mu.Unlock()
+		return h, nil
+	}
+	c.mu.Unlock()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.Sum256(data)
+	result := hex.EncodeToString(h[:])
+
+	c.mu.Lock()
+	c.hashes[path] = result
+	c.mu.Unlock()
+	return result, nil
+}
+
+func outputCacheKey(wd string, opts *GenerateOptions, root *packages.Package, fhc *fileHashCache) (string, error) {
 	sum := sha256.New()
-	sum.Write([]byte("wire-output-cache-v1\n"))
+	sum.Write([]byte("wire-output-cache-v2\n"))
 	sum.Write([]byte(runtime.Version()))
 	sum.Write([]byte{'\n'})
 	sum.Write([]byte(canonicalWirePath(wd)))
@@ -176,29 +217,25 @@ func outputCacheKey(wd string, opts *GenerateOptions, root *packages.Package) (s
 			files := append([]string(nil), pkg.GoFiles...)
 			sort.Strings(files)
 			for _, name := range files {
-				info, err := os.Stat(name)
+				h, err := fhc.hash(name)
 				if err != nil {
 					return "", err
 				}
 				sum.Write([]byte(name))
 				sum.Write([]byte{'\n'})
-				sum.Write([]byte(strconv.FormatInt(info.Size(), 10)))
+				sum.Write([]byte(h))
 				sum.Write([]byte{'\n'})
-				sum.Write([]byte(strconv.FormatInt(info.ModTime().UnixNano(), 10)))
-				sum.Write([]byte{'\n'})
-				if pkg.PkgPath == root.PkgPath {
-					src, err := os.ReadFile(name)
-					if err != nil {
-						return "", err
-					}
-					sum.Write(src)
-					sum.Write([]byte{'\n'})
-				}
 			}
 			continue
 		}
-		sum.Write([]byte(pkg.ExportFile))
-		sum.Write([]byte{'\n'})
+		if pkg.ExportFile != "" {
+			h, err := fhc.hash(pkg.ExportFile)
+			if err != nil {
+				return "", err
+			}
+			sum.Write([]byte(h))
+			sum.Write([]byte{'\n'})
+		}
 	}
 	return hex.EncodeToString(sum.Sum(nil)), nil
 }
@@ -238,6 +275,15 @@ func isLocalWirePackage(workspace string, pkg *packages.Package) bool {
 		return true
 	}
 	return len(dir) > len(workspace) && dir[:len(workspace)] == workspace && dir[len(workspace)] == filepath.Separator
+}
+
+func hashExportFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:]), nil
 }
 
 func detectWireModuleRoot(start string) string {
