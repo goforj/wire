@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/zeebo/xxh3"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/tools/go/packages"
 
 	"github.com/goforj/wire/internal/cachepaths"
@@ -66,39 +67,56 @@ func prepareGenerateOutputCache(ctx context.Context, wd string, env []string, pa
 		return nil, nil, rootResult.Discovery, false
 	}
 
+	// compute keys and lookup cache entries in parallel
+	type cacheEntry struct {
+		candidate outputCacheCandidate
+		result    *GenerateResult // nil if miss
+	}
+	entries := make([]cacheEntry, len(rootResult.Packages))
+
+	g, _ := errgroup.WithContext(ctx)
+	for i, pkg := range rootResult.Packages {
+		g.Go(func() error {
+			outDir, err := detectOutputDir(pkg.GoFiles)
+			if err != nil {
+				return err
+			}
+			key, err := outputCacheKey(wd, opts, pkg, fhc)
+			if err != nil {
+				return err
+			}
+			path, err := outputCachePath(env, key)
+			if err != nil {
+				return err
+			}
+			entries[i].candidate = outputCacheCandidate{
+				path:       path,
+				outputPath: filepath.Join(outDir, opts.PrefixOutputFile+"wire_gen.go"),
+			}
+			if entry, ok := readOutputCache(path); ok {
+				entries[i].result = &GenerateResult{
+					PkgPath:    pkg.PkgPath,
+					OutputPath: entries[i].candidate.outputPath,
+					Content:    entry.Content,
+				}
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		debugf(ctx, "generate.output_cache=error err=%v", err)
+		return candidates, nil, rootResult.Discovery, false
+	}
+
 	allHit := true
-	for _, pkg := range rootResult.Packages {
-		outDir, err := detectOutputDir(pkg.GoFiles)
-		if err != nil {
-			debugf(ctx, "generate.output_cache=bad_output_dir")
-			return candidates, nil, rootResult.Discovery, false
-		}
-		key, err := outputCacheKey(wd, opts, pkg, fhc)
-		if err != nil {
-			debugf(ctx, "generate.output_cache=key_error pkg=%s err=%v", pkg.PkgPath, err)
-			return candidates, nil, rootResult.Discovery, false
-		}
-		debugf(ctx, "generate.output_cache.key pkg=%s key=%s reachable=%d", pkg.PkgPath, key, len(reachablePackages(pkg)))
-		path, err := outputCachePath(env, key)
-		if err != nil {
-			debugf(ctx, "generate.output_cache=path_error")
-			return candidates, nil, rootResult.Discovery, false
-		}
-		candidates[pkg.PkgPath] = outputCacheCandidate{
-			path:       path,
-			outputPath: filepath.Join(outDir, opts.PrefixOutputFile+"wire_gen.go"),
-		}
-		entry, ok := readOutputCache(path)
-		if !ok {
+	for i, pkg := range rootResult.Packages {
+		candidates[pkg.PkgPath] = entries[i].candidate
+		if entries[i].result != nil {
+			results = append(results, *entries[i].result)
+		} else {
 			debugf(ctx, "generate.output_cache=miss pkg=%s", pkg.PkgPath)
 			allHit = false
-			continue
 		}
-		results = append(results, GenerateResult{
-			PkgPath:    pkg.PkgPath,
-			OutputPath: filepath.Join(outDir, opts.PrefixOutputFile+"wire_gen.go"),
-			Content:    entry.Content,
-		})
 	}
 	if allHit {
 		debugf(ctx, "generate.output_cache=hit")
