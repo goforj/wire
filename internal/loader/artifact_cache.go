@@ -16,15 +16,15 @@ package loader
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"go/token"
 	"go/types"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 
+	"github.com/zeebo/xxh3"
 	"golang.org/x/tools/go/gcexportdata"
 
 	"github.com/goforj/wire/internal/cachepaths"
@@ -56,8 +56,8 @@ func loaderArtifactPath(env []string, meta *packageMeta, isLocal bool) (string, 
 }
 
 func loaderArtifactKey(meta *packageMeta, isLocal bool) (string, error) {
-	sum := sha256.New()
-	sum.Write([]byte("wire-loader-artifact-v4\n"))
+	sum := xxh3.New()
+	sum.Write([]byte("wire-loader-artifact-v5\n"))
 	sum.Write([]byte(runtime.Version()))
 	sum.Write([]byte{'\n'})
 	sum.Write([]byte(meta.ImportPath))
@@ -83,22 +83,21 @@ func loaderArtifactKey(meta *packageMeta, isLocal bool) (string, error) {
 			sum.Write([]byte(meta.Error.Err))
 			sum.Write([]byte{'\n'})
 		}
-		return hex.EncodeToString(sum.Sum(nil)), nil
+		return strconv.FormatUint(sum.Sum64(), 16), nil
 	}
 	if err := hashMetaFiles(sum, metaFiles(meta)); err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(sum.Sum(nil)), nil
+	return strconv.FormatUint(sum.Sum64(), 16), nil
 }
 
-// hashFileContent returns the hex-encoded SHA-256 of the file content.
+// hashFileContent returns the hex-encoded xxh3 hash of the file content.
 func hashFileContent(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:]), nil
+	return strconv.FormatUint(xxh3.Hash(data), 16), nil
 }
 
 // hashMetaFiles writes content-based hashes for each file into sum.

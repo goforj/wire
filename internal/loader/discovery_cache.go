@@ -2,15 +2,16 @@ package loader
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/gob"
-	"encoding/hex"
 	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
+
+	"github.com/zeebo/xxh3"
 
 	"github.com/goforj/wire/internal/cachepaths"
 )
@@ -254,7 +255,7 @@ func fingerprintDiscoveryFile(path string) (discoveryFileFingerprint, bool) {
 	if err != nil {
 		return discoveryFileFingerprint{}, false
 	}
-	sum := sha256.New()
+	sum := xxh3.New()
 	sum.Write([]byte(filepath.Base(path)))
 	sum.Write([]byte{0})
 	file, err := parser.ParseFile(token.NewFileSet(), path, src, parser.ImportsOnly|parser.ParseComments)
@@ -262,7 +263,7 @@ func fingerprintDiscoveryFile(path string) (discoveryFileFingerprint, bool) {
 		sum.Write(src)
 		return discoveryFileFingerprint{
 			Path: canonicalLoaderPath(path),
-			Hash: hex.EncodeToString(sum.Sum(nil)),
+			Hash: strconv.FormatUint(sum.Sum64(), 16),
 		}, true
 	}
 	if offset := int(file.Package) - 1; offset > 0 && offset <= len(src) {
@@ -280,7 +281,7 @@ func fingerprintDiscoveryFile(path string) (discoveryFileFingerprint, bool) {
 	}
 	return discoveryFileFingerprint{
 		Path: canonicalLoaderPath(path),
-		Hash: hex.EncodeToString(sum.Sum(nil)),
+		Hash: strconv.FormatUint(sum.Sum64(), 16),
 	}, true
 }
 
@@ -297,6 +298,5 @@ func hashGob(v interface{}) (string, error) {
 	if err := gob.NewEncoder(&buf).Encode(v); err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(buf.Bytes())
-	return hex.EncodeToString(sum[:]), nil
+	return strconv.FormatUint(xxh3.Hash(buf.Bytes()), 16), nil
 }
