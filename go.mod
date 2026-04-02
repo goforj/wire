@@ -1,6 +1,6 @@
 module github.com/goforj/wire
 
-go 1.19
+go 1.22
 
 require (
 	github.com/fsnotify/fsnotify v1.7.0
@@ -11,7 +11,9 @@ require (
 )
 
 require (
+	github.com/klauspost/cpuid/v2 v2.2.10 // indirect
+	github.com/zeebo/xxh3 v1.1.0 // indirect
 	golang.org/x/mod v0.20.0 // indirect
 	golang.org/x/sync v0.8.0 // indirect
-	golang.org/x/sys v0.23.0 // indirect
+	golang.org/x/sys v0.30.0 // indirect
 )

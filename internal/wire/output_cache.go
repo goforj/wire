@@ -2,16 +2,16 @@ package wire
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/gob"
-	"encoding/hex"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/zeebo/xxh3"
 	"golang.org/x/tools/go/packages"
 
 	"github.com/goforj/wire/internal/cachepaths"
@@ -57,6 +57,15 @@ func prepareGenerateOutputCache(ctx context.Context, wd string, env []string, pa
 	candidates := make(map[string]outputCacheCandidate, len(rootResult.Packages))
 	results := make([]GenerateResult, 0, len(rootResult.Packages))
 	fhc := newFileHashCache()
+
+	// prefetch: collect all reachable files across all targets, hash in parallel
+	workspace := detectWireModuleRoot(wd)
+	allFiles := collectReachableFiles(workspace, rootResult.Packages)
+	if err := fhc.prefetch(allFiles); err != nil {
+		debugf(ctx, "generate.output_cache=prefetch_error err=%v", err)
+		return nil, nil, rootResult.Discovery, false
+	}
+
 	allHit := true
 	for _, pkg := range rootResult.Packages {
 		outDir, err := detectOutputDir(pkg.GoFiles)
@@ -186,8 +195,7 @@ func (c *fileHashCache) hash(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	h := sha256.Sum256(data)
-	result := hex.EncodeToString(h[:])
+	result := strconv.FormatUint(xxh3.Hash(data), 16)
 
 	c.mu.Lock()
 	c.hashes[path] = result
@@ -195,9 +203,64 @@ func (c *fileHashCache) hash(path string) (string, error) {
 	return result, nil
 }
 
+// prefetch hashes all given file paths concurrently using a worker pool.
+// After prefetch, subsequent hash() calls are instant cache lookups.
+func (c *fileHashCache) prefetch(paths []string) error {
+	// filter out already cached paths
+	var todo []string
+	c.mu.Lock()
+	for _, p := range paths {
+		if _, ok := c.hashes[p]; !ok {
+			todo = append(todo, p)
+		}
+	}
+	c.mu.Unlock()
+	if len(todo) == 0 {
+		return nil
+	}
+
+	workers := runtime.NumCPU() * 4
+	if workers > 64 {
+		workers = 64
+	}
+	if len(todo) < workers {
+		workers = len(todo)
+	}
+
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		errs []error
+		jobs = make(chan string, len(todo))
+	)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for path := range jobs {
+				if _, err := c.hash(path); err != nil {
+					mu.Lock()
+					errs = append(errs, err)
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	for _, p := range todo {
+		jobs <- p
+	}
+	close(jobs)
+	wg.Wait()
+
+	if len(errs) > 0 {
+		return errs[0]
+	}
+	return nil
+}
+
 func outputCacheKey(wd string, opts *GenerateOptions, root *packages.Package, fhc *fileHashCache) (string, error) {
-	sum := sha256.New()
-	sum.Write([]byte("wire-output-cache-v2\n"))
+	sum := xxh3.New()
+	sum.Write([]byte("wire-output-cache-v3\n"))
 	sum.Write([]byte(runtime.Version()))
 	sum.Write([]byte{'\n'})
 	sum.Write([]byte(canonicalWirePath(wd)))
@@ -237,7 +300,27 @@ func outputCacheKey(wd string, opts *GenerateOptions, root *packages.Package, fh
 			sum.Write([]byte{'\n'})
 		}
 	}
-	return hex.EncodeToString(sum.Sum(nil)), nil
+	return strconv.FormatUint(sum.Sum64(), 16), nil
+}
+
+func collectReachableFiles(workspace string, roots []*packages.Package) []string {
+	seen := make(map[string]struct{})
+	for _, root := range roots {
+		for _, pkg := range reachablePackages(root) {
+			if isLocalWirePackage(workspace, pkg) {
+				for _, name := range pkg.GoFiles {
+					seen[name] = struct{}{}
+				}
+			} else if pkg.ExportFile != "" {
+				seen[pkg.ExportFile] = struct{}{}
+			}
+		}
+	}
+	files := make([]string, 0, len(seen))
+	for f := range seen {
+		files = append(files, f)
+	}
+	return files
 }
 
 func reachablePackages(root *packages.Package) []*packages.Package {
@@ -282,8 +365,7 @@ func hashExportFile(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:]), nil
+	return strconv.FormatUint(xxh3.Hash(data), 16), nil
 }
 
 func detectWireModuleRoot(start string) string {
