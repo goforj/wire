@@ -720,7 +720,7 @@ func (ig *injectorGen) funcProviderCall(lname string, c *call, injectSig outputS
 		ig.p(", %s", ig.errVar)
 	}
 	ig.p(" := ")
-	ig.p("%s(", ig.g.qualifiedID(c.pkg.Name(), c.pkg.Path(), c.name))
+	ig.p("%s(", ig.funcProviderExpr(c))
 	for i, a := range c.args {
 		if i > 0 {
 			ig.p(", ")
@@ -748,6 +748,17 @@ func (ig *injectorGen) funcProviderCall(lname string, c *call, injectSig outputS
 		ig.p(", err\n")
 		ig.p("\t}\n")
 	}
+}
+
+func (ig *injectorGen) funcProviderExpr(c *call) string {
+	if c.methodExprRecv == nil {
+		return ig.g.qualifiedID(c.pkg.Name(), c.pkg.Path(), c.name)
+	}
+	recv := types.TypeString(c.methodExprRecv, ig.g.qualifyPkg)
+	if _, ok := c.methodExprRecv.(*types.Pointer); ok {
+		recv = "(" + recv + ")"
+	}
+	return recv + "." + c.name
 }
 
 func (ig *injectorGen) structProviderCall(lname string, c *call) {

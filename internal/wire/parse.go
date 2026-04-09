@@ -156,6 +156,10 @@ type Provider struct {
 	// Name is the name of the Go object.
 	Name string
 
+	// MethodExprRecv is the receiver type for a method expression provider.
+	// It is nil for package-level function providers.
+	MethodExprRecv types.Type
+
 	// Pos is the source position of the func keyword or type spec
 	// defining this provider.
 	Pos token.Pos
@@ -718,6 +722,12 @@ func valueSpecForVar(fset *token.FileSet, files []*ast.File, obj *types.Var) *as
 func (oc *objectCache) processExpr(info *types.Info, pkgPath string, expr ast.Expr, varName string) (interface{}, []error) {
 	exprPos := oc.fset.Position(expr.Pos())
 	expr = astutil.Unparen(expr)
+	if sel, ok := expr.(*ast.SelectorExpr); ok {
+		if selInfo := info.Selections[sel]; selInfo != nil && selInfo.Kind() == types.MethodExpr {
+			p, errs := processMethodExprProvider(oc.fset, info, sel, selInfo)
+			return p, notePositionAll(exprPos, errs)
+		}
+	}
 	if obj := qualifiedIdentObject(info, expr); obj != nil {
 		item, errs := oc.get(obj)
 		return item, mapErrors(errs, func(err error) error {
@@ -877,20 +887,37 @@ func qualifiedIdentObject(info *types.Info, expr ast.Expr) types.Object {
 func processFuncProvider(fset *token.FileSet, fn *types.Func) (*Provider, []error) {
 	sig := fn.Type().(*types.Signature)
 	fpos := fn.Pos()
+	return processProviderSignature(fset, fn.Pkg(), fn.Name(), nil, fpos, sig)
+}
+
+func processMethodExprProvider(fset *token.FileSet, info *types.Info, expr *ast.SelectorExpr, sel *types.Selection) (*Provider, []error) {
+	obj, ok := sel.Obj().(*types.Func)
+	if !ok {
+		return nil, []error{fmt.Errorf("%s is not a function", expr.Sel.Name)}
+	}
+	sig, ok := info.TypeOf(expr).(*types.Signature)
+	if !ok {
+		return nil, []error{fmt.Errorf("method expression %s does not have a function signature", expr.Sel.Name)}
+	}
+	return processProviderSignature(fset, obj.Pkg(), obj.Name(), sel.Recv(), expr.Pos(), sig)
+}
+
+func processProviderSignature(fset *token.FileSet, pkg *types.Package, name string, recv types.Type, pos token.Pos, sig *types.Signature) (*Provider, []error) {
 	providerSig, err := funcOutput(sig)
 	if err != nil {
-		return nil, []error{notePosition(fset.Position(fpos), fmt.Errorf("wrong signature for provider %s: %v", fn.Name(), err))}
+		return nil, []error{notePosition(fset.Position(pos), fmt.Errorf("wrong signature for provider %s: %v", name, err))}
 	}
 	params := sig.Params()
 	provider := &Provider{
-		Pkg:        fn.Pkg(),
-		Name:       fn.Name(),
-		Pos:        fn.Pos(),
-		Args:       make([]ProviderInput, params.Len()),
-		Varargs:    sig.Variadic(),
-		Out:        []types.Type{providerSig.out},
-		HasCleanup: providerSig.cleanup,
-		HasErr:     providerSig.err,
+		Pkg:            pkg,
+		Name:           name,
+		MethodExprRecv: recv,
+		Pos:            pos,
+		Args:           make([]ProviderInput, params.Len()),
+		Varargs:        sig.Variadic(),
+		Out:            []types.Type{providerSig.out},
+		HasCleanup:     providerSig.cleanup,
+		HasErr:         providerSig.err,
 	}
 	for i := 0; i < params.Len(); i++ {
 		provider.Args[i] = ProviderInput{
@@ -898,7 +925,7 @@ func processFuncProvider(fset *token.FileSet, fn *types.Func) (*Provider, []erro
 		}
 		for j := 0; j < i; j++ {
 			if types.Identical(provider.Args[i].Type, provider.Args[j].Type) {
-				return nil, []error{notePosition(fset.Position(fpos), fmt.Errorf("provider has multiple parameters of type %s", types.TypeString(provider.Args[j].Type, nil)))}
+				return nil, []error{notePosition(fset.Position(pos), fmt.Errorf("provider has multiple parameters of type %s", types.TypeString(provider.Args[j].Type, nil)))}
 			}
 		}
 	}
