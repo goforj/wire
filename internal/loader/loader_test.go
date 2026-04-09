@@ -32,6 +32,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/goforj/wire/internal/cachepolicy"
 	"golang.org/x/tools/go/gcexportdata"
 	"golang.org/x/tools/go/packages"
 )
@@ -2383,6 +2384,81 @@ func TestLoaderArtifactKeyExternalWithoutExportChangesWhenSourceChanges(t *testi
 
 	if first == second {
 		t.Fatalf("loaderArtifactKey did not change after external source update without export data: %q", first)
+	}
+}
+
+func TestLoaderArtifactKeyDefaultModTimeIgnoresContentOnlyChangeWithSameMetadata(t *testing.T) {
+	restore := cachepolicy.SetForTest(cachepolicy.ModeMTime)
+	defer restore()
+
+	exportPath := filepath.Join(t.TempDir(), "dep.a")
+	writeTestFile(t, exportPath, "export-payload-one")
+
+	info, err := os.Stat(exportPath)
+	if err != nil {
+		t.Fatalf("Stat(%q) error = %v", exportPath, err)
+	}
+
+	meta := &packageMeta{
+		ImportPath: "example.com/dep",
+		Name:       "dep",
+		Export:     exportPath,
+	}
+
+	first, err := loaderArtifactKey(meta, false)
+	if err != nil {
+		t.Fatalf("loaderArtifactKey(first) error = %v", err)
+	}
+
+	writeTestFile(t, exportPath, "export-payload-two")
+	if err := os.Chtimes(exportPath, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatalf("Chtimes(%q) error = %v", exportPath, err)
+	}
+
+	second, err := loaderArtifactKey(meta, false)
+	if err != nil {
+		t.Fatalf("loaderArtifactKey(second) error = %v", err)
+	}
+
+	if first != second {
+		t.Fatalf("loaderArtifactKey changed under default mod-time mode: %q != %q", first, second)
+	}
+}
+
+func TestLoaderArtifactKeyContentModeDetectsContentOnlyChangeWithSameMetadata(t *testing.T) {
+	exportPath := filepath.Join(t.TempDir(), "dep.a")
+	restore := cachepolicy.SetForTest(cachepolicy.ModeContent)
+	defer restore()
+	writeTestFile(t, exportPath, "export-payload-one")
+
+	info, err := os.Stat(exportPath)
+	if err != nil {
+		t.Fatalf("Stat(%q) error = %v", exportPath, err)
+	}
+
+	meta := &packageMeta{
+		ImportPath: "example.com/dep",
+		Name:       "dep",
+		Export:     exportPath,
+	}
+
+	first, err := loaderArtifactKey(meta, false)
+	if err != nil {
+		t.Fatalf("loaderArtifactKey(first) error = %v", err)
+	}
+
+	writeTestFile(t, exportPath, "export-payload-two")
+	if err := os.Chtimes(exportPath, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatalf("Chtimes(%q) error = %v", exportPath, err)
+	}
+
+	second, err := loaderArtifactKey(meta, false)
+	if err != nil {
+		t.Fatalf("loaderArtifactKey(second) error = %v", err)
+	}
+
+	if first == second {
+		t.Fatalf("loaderArtifactKey did not change under content mode")
 	}
 }
 

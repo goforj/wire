@@ -24,10 +24,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 
 	"golang.org/x/tools/go/gcexportdata"
 
 	"github.com/goforj/wire/internal/cachepaths"
+	"github.com/goforj/wire/internal/cachepolicy"
 )
 
 const (
@@ -57,25 +59,25 @@ func loaderArtifactPath(env []string, meta *packageMeta, isLocal bool) (string, 
 
 func loaderArtifactKey(meta *packageMeta, isLocal bool) (string, error) {
 	sum := sha256.New()
-	sum.Write([]byte("wire-loader-artifact-v4\n"))
+	sum.Write([]byte("wire-loader-artifact-v5\n"))
 	sum.Write([]byte(runtime.Version()))
+	sum.Write([]byte{'\n'})
+	sum.Write([]byte(cachepolicy.ModeLabel()))
 	sum.Write([]byte{'\n'})
 	sum.Write([]byte(meta.ImportPath))
 	sum.Write([]byte{'\n'})
 	sum.Write([]byte(meta.Name))
 	sum.Write([]byte{'\n'})
+	useFileContent := cachepolicy.UseFileContent()
 	if !isLocal {
 		sum.Write([]byte(meta.Export))
 		sum.Write([]byte{'\n'})
 		if meta.Export != "" {
-			h, err := hashFileContent(meta.Export)
-			if err != nil {
+			if err := hashFileInput(sum, meta.Export, useFileContent); err != nil {
 				return "", err
 			}
-			sum.Write([]byte(h))
-			sum.Write([]byte{'\n'})
 		} else {
-			if err := hashMetaFiles(sum, metaFiles(meta)); err != nil {
+			if err := hashMetaFiles(sum, metaFiles(meta), useFileContent); err != nil {
 				return "", err
 			}
 		}
@@ -85,7 +87,7 @@ func loaderArtifactKey(meta *packageMeta, isLocal bool) (string, error) {
 		}
 		return hex.EncodeToString(sum.Sum(nil)), nil
 	}
-	if err := hashMetaFiles(sum, metaFiles(meta)); err != nil {
+	if err := hashMetaFiles(sum, metaFiles(meta), useFileContent); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(sum.Sum(nil)), nil
@@ -101,18 +103,36 @@ func hashFileContent(path string) (string, error) {
 	return hex.EncodeToString(h[:]), nil
 }
 
-// hashMetaFiles writes content-based hashes for each file into sum.
-func hashMetaFiles(sum io.Writer, names []string) error {
+// hashMetaFiles writes file identity inputs for each file into sum.
+func hashMetaFiles(sum io.Writer, names []string, useFileContent bool) error {
 	for _, name := range names {
 		sum.Write([]byte(name))
 		sum.Write([]byte{'\n'})
-		h, err := hashFileContent(name)
+		if err := hashFileInput(sum, name, useFileContent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func hashFileInput(sum io.Writer, path string, useFileContent bool) error {
+	if useFileContent {
+		h, err := hashFileContent(path)
 		if err != nil {
 			return err
 		}
 		sum.Write([]byte(h))
 		sum.Write([]byte{'\n'})
+		return nil
 	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	sum.Write([]byte(strconv.FormatInt(info.Size(), 10)))
+	sum.Write([]byte{'\n'})
+	sum.Write([]byte(strconv.FormatInt(info.ModTime().UnixNano(), 10)))
+	sum.Write([]byte{'\n'})
 	return nil
 }
 

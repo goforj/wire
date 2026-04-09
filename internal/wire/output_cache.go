@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/gob"
 	"encoding/hex"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,6 +16,7 @@ import (
 	"golang.org/x/tools/go/packages"
 
 	"github.com/goforj/wire/internal/cachepaths"
+	"github.com/goforj/wire/internal/cachepolicy"
 	"github.com/goforj/wire/internal/loader"
 )
 
@@ -159,6 +161,8 @@ func outputCacheKey(wd string, opts *GenerateOptions, root *packages.Package) (s
 	sum.Write([]byte("wire-output-cache-v1\n"))
 	sum.Write([]byte(runtime.Version()))
 	sum.Write([]byte{'\n'})
+	sum.Write([]byte(cachepolicy.ModeLabel()))
+	sum.Write([]byte{'\n'})
 	sum.Write([]byte(canonicalWirePath(wd)))
 	sum.Write([]byte{'\n'})
 	sum.Write(opts.Header)
@@ -168,6 +172,7 @@ func outputCacheKey(wd string, opts *GenerateOptions, root *packages.Package) (s
 	sum.Write([]byte(root.PkgPath))
 	sum.Write([]byte{'\n'})
 	workspace := detectWireModuleRoot(wd)
+	useFileContent := cachepolicy.UseFileContent()
 	pkgs := reachablePackages(root)
 	for _, pkg := range pkgs {
 		sum.Write([]byte(pkg.PkgPath))
@@ -176,23 +181,16 @@ func outputCacheKey(wd string, opts *GenerateOptions, root *packages.Package) (s
 			files := append([]string(nil), pkg.GoFiles...)
 			sort.Strings(files)
 			for _, name := range files {
-				info, err := os.Stat(name)
-				if err != nil {
-					return "", err
-				}
 				sum.Write([]byte(name))
 				sum.Write([]byte{'\n'})
-				sum.Write([]byte(strconv.FormatInt(info.Size(), 10)))
-				sum.Write([]byte{'\n'})
-				sum.Write([]byte(strconv.FormatInt(info.ModTime().UnixNano(), 10)))
-				sum.Write([]byte{'\n'})
-				if pkg.PkgPath == root.PkgPath {
-					src, err := os.ReadFile(name)
-					if err != nil {
+				if useFileContent {
+					if err := writeOutputCacheContentIdentity(sum, name); err != nil {
 						return "", err
 					}
-					sum.Write(src)
-					sum.Write([]byte{'\n'})
+				} else {
+					if err := writeOutputCacheModTimeIdentity(sum, name); err != nil {
+						return "", err
+					}
 				}
 			}
 			continue
@@ -201,6 +199,29 @@ func outputCacheKey(wd string, opts *GenerateOptions, root *packages.Package) (s
 		sum.Write([]byte{'\n'})
 	}
 	return hex.EncodeToString(sum.Sum(nil)), nil
+}
+
+func writeOutputCacheModTimeIdentity(sum io.Writer, path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	sum.Write([]byte(strconv.FormatInt(info.Size(), 10)))
+	sum.Write([]byte{'\n'})
+	sum.Write([]byte(strconv.FormatInt(info.ModTime().UnixNano(), 10)))
+	sum.Write([]byte{'\n'})
+	return nil
+}
+
+func writeOutputCacheContentIdentity(sum io.Writer, path string) error {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	fileSum := sha256.Sum256(src)
+	sum.Write([]byte(hex.EncodeToString(fileSum[:])))
+	sum.Write([]byte{'\n'})
+	return nil
 }
 
 func reachablePackages(root *packages.Package) []*packages.Package {

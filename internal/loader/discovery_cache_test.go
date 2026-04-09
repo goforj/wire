@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/goforj/wire/internal/cachepolicy"
 )
 
 func TestDiscoveryFingerprintIgnoresBodyOnlyEdits(t *testing.T) {
@@ -122,5 +124,69 @@ func TestDiscoveryDirDetectsFileSetChange(t *testing.T) {
 	}
 	if matchesDiscoveryDir(before) {
 		t.Fatalf("directory metadata did not detect added file")
+	}
+}
+
+func TestMatchesDiscoveryFileDefaultModTimeIgnoresContentOnlyChangeWithSameMetadata(t *testing.T) {
+	restore := cachepolicy.SetForTest(cachepolicy.ModeMTime)
+	defer restore()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "go.mod")
+	write := func(content string) {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write("module example.com/one\n")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, ok := statDiscoveryFile(path, false)
+	if !ok {
+		t.Fatalf("statDiscoveryFile(%q) failed", path)
+	}
+
+	write("module example.com/two\n")
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+
+	if !matchesDiscoveryFile(meta, false) {
+		t.Fatalf("default mod-time matching rejected unchanged size/modtime metadata")
+	}
+}
+
+func TestMatchesDiscoveryFileContentModeDetectsContentOnlyChangeWithSameMetadata(t *testing.T) {
+	restore := cachepolicy.SetForTest(cachepolicy.ModeContent)
+	defer restore()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "go.mod")
+	write := func(content string) {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write("module example.com/one\n")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, ok := statDiscoveryFile(path, true)
+	if !ok {
+		t.Fatalf("statDiscoveryFile(%q) failed", path)
+	}
+
+	write("module example.com/two\n")
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+
+	if matchesDiscoveryFile(meta, true) {
+		t.Fatalf("content-based matching accepted changed file content")
 	}
 }

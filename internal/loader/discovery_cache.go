@@ -13,6 +13,7 @@ import (
 	"sort"
 
 	"github.com/goforj/wire/internal/cachepaths"
+	"github.com/goforj/wire/internal/cachepolicy"
 )
 
 type discoveryCacheEntry struct {
@@ -32,7 +33,7 @@ type discoveryLocalPackage struct {
 type discoveryFileMeta struct {
 	Path        string
 	Size        int64
-	ModTime     int64  // deprecated: kept for gob compat, not used for matching
+	ModTime     int64
 	ContentHash string // sha256 of file content
 	IsDir       bool
 }
@@ -47,7 +48,7 @@ type discoveryFileFingerprint struct {
 	Hash string
 }
 
-const discoveryCacheVersion = 4
+const discoveryCacheVersion = 5
 
 func readDiscoveryCache(req goListRequest) (map[string]*packageMeta, bool) {
 	entry, err := loadDiscoveryCacheEntry(req)
@@ -62,6 +63,7 @@ func readDiscoveryCache(req goListRequest) (map[string]*packageMeta, bool) {
 
 func buildDiscoveryCacheEntry(req goListRequest, meta map[string]*packageMeta) (*discoveryCacheEntry, error) {
 	workspace := detectModuleRoot(req.WD)
+	useFileContent := cachepolicy.UseFileContent()
 	entry := &discoveryCacheEntry{
 		Version: discoveryCacheVersion,
 		Meta:    meta,
@@ -73,7 +75,7 @@ func buildDiscoveryCacheEntry(req goListRequest, meta map[string]*packageMeta) (
 		filepath.Join(workspace, "go.work.sum"),
 	}
 	for _, name := range global {
-		if fm, ok := statDiscoveryFile(name); ok {
+		if fm, ok := statDiscoveryFile(name, useFileContent); ok {
 			entry.Global = append(entry.Global, fm)
 		}
 	}
@@ -106,8 +108,9 @@ func validateDiscoveryCacheEntry(entry *discoveryCacheEntry) bool {
 	if entry == nil || entry.Version != discoveryCacheVersion {
 		return false
 	}
+	useFileContent := cachepolicy.UseFileContent()
 	for _, fm := range entry.Global {
-		if !matchesDiscoveryFile(fm) {
+		if !matchesDiscoveryFile(fm, useFileContent) {
 			return false
 		}
 	}
@@ -133,6 +136,7 @@ func discoveryCachePath(req goListRequest) (string, error) {
 	}
 	sumReq := struct {
 		Version      int
+		CacheMode    string
 		WD           string
 		Tags         string
 		Patterns     []string
@@ -141,6 +145,7 @@ func discoveryCachePath(req goListRequest) (string, error) {
 		Go           string
 	}{
 		Version:      discoveryCacheVersion,
+		CacheMode:    cachepolicy.ModeLabel(),
 		WD:           canonicalLoaderPath(req.WD),
 		Tags:         req.Tags,
 		Patterns:     append([]string(nil), req.Patterns...),
@@ -188,13 +193,13 @@ func saveDiscoveryCacheEntry(req goListRequest, entry *discoveryCacheEntry) erro
 	return gob.NewEncoder(f).Encode(entry)
 }
 
-func statDiscoveryFile(path string) (discoveryFileMeta, bool) {
+func statDiscoveryFile(path string, useFileContent bool) (discoveryFileMeta, bool) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return discoveryFileMeta{}, false
 	}
 	h := ""
-	if !info.IsDir() {
+	if !info.IsDir() && useFileContent {
 		var err error
 		h, err = hashFileContent(path)
 		if err != nil {
@@ -204,17 +209,24 @@ func statDiscoveryFile(path string) (discoveryFileMeta, bool) {
 	return discoveryFileMeta{
 		Path:        canonicalLoaderPath(path),
 		Size:        info.Size(),
+		ModTime:     info.ModTime().UnixNano(),
 		ContentHash: h,
 		IsDir:       info.IsDir(),
 	}, true
 }
 
-func matchesDiscoveryFile(fm discoveryFileMeta) bool {
-	cur, ok := statDiscoveryFile(fm.Path)
+func matchesDiscoveryFile(fm discoveryFileMeta, useFileContent bool) bool {
+	cur, ok := statDiscoveryFile(fm.Path, useFileContent)
 	if !ok {
 		return false
 	}
-	return cur.ContentHash == fm.ContentHash && cur.IsDir == fm.IsDir
+	if cur.IsDir != fm.IsDir {
+		return false
+	}
+	if useFileContent {
+		return cur.ContentHash == fm.ContentHash
+	}
+	return cur.Size == fm.Size && cur.ModTime == fm.ModTime
 }
 
 func statDiscoveryDir(path string) (discoveryDirMeta, bool) {
