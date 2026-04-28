@@ -20,7 +20,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         go-version: [1.25.x]
+        cache-mode: [mtime, content]
     runs-on: ${{ matrix.os }}
+    env:
+      WIRE_CACHE_MODE: ${{ matrix.cache-mode }}
     steps:
       - name: Install Go
         uses: actions/setup-go@v2
@@ -33,9 +36,6 @@ jobs:
       - name: Run Tests
         shell: bash
         run: 'internal/runtests.sh'
-
-      - name: Run tests
-        run: go test ./... -v
 
   codecov:
     runs-on: ubuntu-latest

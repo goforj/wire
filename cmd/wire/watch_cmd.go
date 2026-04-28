@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/goforj/wire/internal/wire"
 	"github.com/google/subcommands"
 )
 
@@ -102,43 +101,7 @@ func (cmd *watchCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...inter
 
 	env := os.Environ()
 	runGenerate := func() {
-		totalStart := time.Now()
-		genStart := time.Now()
-		outs, errs := wire.Generate(ctx, wd, env, packages(f), opts)
-		logTiming(cmd.profile.timings, "wire.Generate", genStart)
-		if len(errs) > 0 {
-			logErrors(errs)
-			log.Println("generate failed")
-			return
-		}
-		if len(outs) == 0 {
-			logTiming(cmd.profile.timings, "total", totalStart)
-			return
-		}
-		success := true
-		writeStart := time.Now()
-		for _, out := range outs {
-			if len(out.Errs) > 0 {
-				logErrors(out.Errs)
-				log.Printf("%s: generate failed\n", out.PkgPath)
-				success = false
-			}
-			if len(out.Content) == 0 {
-				continue
-			}
-			if err := out.Commit(); err == nil {
-				log.Printf("%s: wrote %s (%s)\n", out.PkgPath, out.OutputPath, formatDuration(time.Since(totalStart)))
-			} else {
-				log.Printf("%s: failed to write %s: %v\n", out.PkgPath, out.OutputPath, err)
-				success = false
-			}
-		}
-		if !success {
-			log.Println("at least one generate failure")
-			return
-		}
-		logTiming(cmd.profile.timings, "writes", writeStart)
-		logTiming(cmd.profile.timings, "total", totalStart)
+		_ = runGenerateCommand(ctx, wd, env, packages(f), opts, cmd.profile.timings)
 	}
 
 	root, err := moduleRoot(wd, env)
@@ -326,11 +289,6 @@ func moduleRoot(wd string, env []string) (string, error) {
 		return wd, nil
 	}
 	return filepath.Dir(path), nil
-}
-
-// formatDuration renders a short millisecond duration for log output.
-func formatDuration(d time.Duration) string {
-	return fmt.Sprintf("%.2fms", float64(d)/float64(time.Millisecond))
 }
 
 // watchWithFSNotify runs the watcher using native filesystem notifications.

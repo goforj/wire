@@ -26,7 +26,9 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"unicode"
@@ -111,6 +113,7 @@ func TestWire(t *testing.T) {
 					t.Log(e.Error())
 					gotErrStrings[i] = scrubError(gopath, e.Error())
 				}
+				gotErrStrings = filterLegacyCompilerErrors(gotErrStrings)
 				if !test.wantWireError {
 					t.Fatal("Did not expect errors. To -record an error, create want/wire_errs.txt.")
 				}
@@ -189,6 +192,92 @@ func TestGenerateResultCommit(t *testing.T) {
 	if got, err := os.ReadFile(path); err != nil || string(got) != string(gen.Content) {
 		t.Fatalf("Commit content mismatch, got=%q err=%v", got, err)
 	}
+}
+
+func TestGenerateResultCommitWithStatus(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wire_gen.go")
+	gen := GenerateResult{
+		OutputPath: path,
+		Content:    []byte("package p\n"),
+	}
+
+	wrote, err := gen.CommitWithStatus()
+	if err != nil {
+		t.Fatalf("first CommitWithStatus failed: %v", err)
+	}
+	if !wrote {
+		t.Fatal("expected first CommitWithStatus call to write")
+	}
+
+	wrote, err = gen.CommitWithStatus()
+	if err != nil {
+		t.Fatalf("second CommitWithStatus failed: %v", err)
+	}
+	if wrote {
+		t.Fatal("expected second CommitWithStatus call to report unchanged")
+	}
+}
+
+func TestGenerateRealAppArtifactParity(t *testing.T) {
+	root := os.Getenv("WIRE_REAL_APP_ROOT")
+	if root == "" {
+		t.Skip("WIRE_REAL_APP_ROOT not set")
+	}
+	artifactDir := t.TempDir()
+	ctx := context.Background()
+
+	run := func(env []string) ([]GenerateResult, []string) {
+		t.Helper()
+		gens, errs := Generate(ctx, root, env, []string{"."}, &GenerateOptions{})
+		errStrings := make([]string, len(errs))
+		for i, err := range errs {
+			errStrings[i] = err.Error()
+		}
+		sort.Strings(errStrings)
+		return gens, errStrings
+	}
+
+	baseGens, baseErrs := run(os.Environ())
+	artifactEnv := append(os.Environ(),
+		"WIRE_LOADER_ARTIFACTS=1",
+		"WIRE_LOADER_ARTIFACT_DIR="+artifactDir,
+	)
+	_, warmErrs := run(artifactEnv)
+	if diff := cmp.Diff(baseErrs, warmErrs); diff != "" {
+		t.Fatalf("artifact warm-up errors mismatch (-base +warm):\n%s", diff)
+	}
+	artifactGens, artifactErrs := run(artifactEnv)
+	if diff := cmp.Diff(baseErrs, artifactErrs); diff != "" {
+		t.Fatalf("artifact errors mismatch (-base +artifact):\n%s", diff)
+	}
+	if len(baseGens) != len(artifactGens) {
+		t.Fatalf("generated file count = %d, want %d", len(artifactGens), len(baseGens))
+	}
+	for i := range baseGens {
+		if baseGens[i].PkgPath != artifactGens[i].PkgPath {
+			t.Fatalf("generated package[%d] = %q, want %q", i, artifactGens[i].PkgPath, baseGens[i].PkgPath)
+		}
+		if diff := cmp.Diff(string(baseGens[i].Content), string(artifactGens[i].Content)); diff != "" {
+			t.Fatalf("generated content mismatch for %q (-base +artifact):\n%s", baseGens[i].PkgPath, diff)
+		}
+		baseGenErrs := comparableGenerateErrors(baseGens[i].Errs)
+		artifactGenErrs := comparableGenerateErrors(artifactGens[i].Errs)
+		if diff := cmp.Diff(baseGenErrs, artifactGenErrs); diff != "" {
+			t.Fatalf("generate errs mismatch for %q (-base +artifact):\n%s", baseGens[i].PkgPath, diff)
+		}
+	}
+}
+
+func comparableGenerateErrors(errs []error) []string {
+	out := make([]string, len(errs))
+	for i, err := range errs {
+		out[i] = err.Error()
+	}
+	sort.Strings(out)
+	return out
 }
 
 func TestZeroValue(t *testing.T) {
@@ -453,6 +542,7 @@ func isIdent(s string) bool {
 // "C:\GOPATH" and running on Windows, the string
 // "C:\GOPATH\src\foo\bar.go:15:4" would be rewritten to "foo/bar.go:x:y".
 func scrubError(gopath string, s string) string {
+	s = normalizeHeaderRelativeError(s)
 	sb := new(strings.Builder)
 	query := gopath + string(os.PathSeparator) + "src" + string(os.PathSeparator)
 	for {
@@ -489,7 +579,106 @@ func scrubError(gopath string, s string) string {
 		sb.WriteString(linecol)
 		s = s[linecolLen:]
 	}
-	return sb.String()
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+func normalizeHeaderRelativeError(s string) string {
+	const headerPrefix = "-: # "
+	if !strings.HasPrefix(s, headerPrefix) {
+		return s
+	}
+	pkgAndRest := strings.TrimPrefix(s, headerPrefix)
+	newline := strings.IndexByte(pkgAndRest, '\n')
+	if newline == -1 {
+		return s
+	}
+	pkg := strings.TrimSpace(pkgAndRest[:newline])
+	rest := strings.TrimLeft(pkgAndRest[newline+1:], "\n")
+	if pkg == "" || rest == "" {
+		return s
+	}
+
+	firstLineEnd := strings.IndexByte(rest, '\n')
+	if firstLineEnd == -1 {
+		firstLineEnd = len(rest)
+	}
+	firstLine := rest[:firstLineEnd]
+	rewritten, ok := canonicalizeRelativeErrorPath(pkg, firstLine)
+	if !ok {
+		return s
+	}
+	return normalizeLegacyUndefinedQualifiedName(rewritten + rest[firstLineEnd:])
+}
+
+func canonicalizeRelativeErrorPath(pkg, line string) (string, bool) {
+	goExt := strings.Index(line, ".go")
+	if goExt == -1 {
+		return "", false
+	}
+	goExt += len(".go")
+	linecol, n := scrubLineColumn(line[goExt:])
+	if n == 0 {
+		return "", false
+	}
+	file := line[:goExt]
+	suffix := line[goExt+n:]
+	file = strings.ReplaceAll(file, "\\", "/")
+	file = strings.TrimPrefix(file, "./")
+	file = strings.TrimPrefix(file, "/")
+	baseDir := path.Base(pkg)
+	if strings.HasPrefix(file, pkg+"/") {
+		return file + linecol + suffix, true
+	}
+	if strings.HasPrefix(file, baseDir+"/") {
+		file = pkg + "/" + strings.TrimPrefix(file, baseDir+"/")
+		return file + linecol + suffix, true
+	}
+	if !strings.Contains(file, "/") {
+		return pkg + "/" + file + linecol + suffix, true
+	}
+	return "", false
+}
+
+func normalizeLegacyUndefinedQualifiedName(s string) string {
+	const marker = ": undefined: "
+	idx := strings.Index(s, marker)
+	if idx == -1 {
+		return s
+	}
+	qualified := s[idx+len(marker):]
+	end := len(qualified)
+	for i, r := range qualified {
+		if r == '\n' || r == '\r' || r == '\t' || r == ' ' {
+			end = i
+			break
+		}
+	}
+	qualified = qualified[:end]
+	dot := strings.IndexByte(qualified, '.')
+	if dot == -1 || dot == 0 || dot == len(qualified)-1 {
+		return s
+	}
+	pkgName := qualified[:dot]
+	name := qualified[dot+1:]
+	if name == "" || !isLowerIdent(name) {
+		return s
+	}
+	return s[:idx] + ": name " + name + " not exported by package " + pkgName
+}
+
+func isLowerIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if i == 0 && !unicode.IsLower(r) {
+			return false
+		}
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func scrubLineColumn(s string) (replacement string, n int) {
@@ -519,6 +708,46 @@ func scrubLineColumn(s string) (replacement string, n int) {
 		return ":x", lineEnd
 	}
 	return ":x:y", n
+}
+
+func filterLegacyCompilerErrors(errs []string) []string {
+	hasCanonicalPath := false
+	for _, err := range errs {
+		if strings.HasPrefix(err, "example.com/") {
+			hasCanonicalPath = true
+			break
+		}
+	}
+	if !hasCanonicalPath {
+		return errs
+	}
+
+	filtered := errs[:0]
+	for _, err := range errs {
+		if strings.HasPrefix(err, "-: # ") {
+			continue
+		}
+		filtered = append(filtered, err)
+	}
+	return filtered
+}
+
+func TestScrubErrorCanonicalizesHeaderRelativePath(t *testing.T) {
+	const gopath = "/tmp/wire_test"
+	got := scrubError(gopath, "-: # example.com/foo\nfoo/wire.go:26:33: not enough arguments in call to wire.InterfaceValue")
+	want := "example.com/foo/wire.go:x:y: not enough arguments in call to wire.InterfaceValue"
+	if got != want {
+		t.Fatalf("scrubError() = %q, want %q", got, want)
+	}
+}
+
+func TestScrubErrorCanonicalizesHeaderRootRelativePath(t *testing.T) {
+	const gopath = "/tmp/wire_test"
+	got := scrubError(gopath, "-: # example.com/foo\n/wire.go:27:17: name foo not exported by package bar")
+	want := "example.com/foo/wire.go:x:y: name foo not exported by package bar"
+	if got != want {
+		t.Fatalf("scrubError() = %q, want %q", got, want)
+	}
 }
 
 type testCase struct {

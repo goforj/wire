@@ -21,10 +21,12 @@ import (
 	"context"
 	"fmt"
 	"go/ast"
+	"go/format"
 	"go/printer"
 	"go/token"
 	"go/types"
 	"io/ioutil"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -53,10 +55,27 @@ type GenerateResult struct {
 
 // Commit writes the generated file to disk.
 func (gen GenerateResult) Commit() error {
+	_, err := gen.CommitWithStatus()
+	return err
+}
+
+// CommitWithStatus writes the generated file to disk when the content changed.
+// It returns whether the file was written.
+func (gen GenerateResult) CommitWithStatus() (bool, error) {
 	if len(gen.Content) == 0 {
-		return nil
+		return false, nil
 	}
-	return ioutil.WriteFile(gen.OutputPath, gen.Content, 0666)
+	current, err := os.ReadFile(gen.OutputPath)
+	if err == nil && bytes.Equal(current, gen.Content) {
+		return false, nil
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	if err := ioutil.WriteFile(gen.OutputPath, gen.Content, 0666); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // GenerateOptions holds options for Generate.
@@ -83,23 +102,72 @@ func Generate(ctx context.Context, wd string, env []string, patterns []string, o
 	if opts == nil {
 		opts = &GenerateOptions{}
 	}
-	if cached, ok := readManifestResults(wd, env, patterns, opts); ok {
+	cacheCandidates, cached, discovery, ok := prepareGenerateOutputCache(ctx, wd, env, patterns, opts)
+	if ok {
 		return cached, nil
 	}
 	loadStart := time.Now()
-	pkgs, loader, errs := load(ctx, wd, env, opts.Tags, patterns)
+	pkgs, errs := load(ctx, wd, env, opts.Tags, patterns, discovery)
 	logTiming(ctx, "generate.load", loadStart)
 	if len(errs) > 0 {
 		return nil, errs
 	}
 	generated := make([]GenerateResult, len(pkgs))
 	for i, pkg := range pkgs {
-		generated[i] = generateForPackage(ctx, pkg, loader, opts)
+		pkgStart := time.Now()
+		generated[i].PkgPath = pkg.PkgPath
+		dirStart := time.Now()
+		outDir, err := detectOutputDir(pkg.GoFiles)
+		logTiming(ctx, "generate.package."+pkg.PkgPath+".output_dir", dirStart)
+		if err != nil {
+			generated[i].Errs = append(generated[i].Errs, err)
+			continue
+		}
+		generated[i].OutputPath = filepath.Join(outDir, opts.PrefixOutputFile+"wire_gen.go")
+		g := newGen(pkg)
+		oc := newObjectCache([]*packages.Package{pkg})
+		injectorStart := time.Now()
+		injectorFiles, genErrs := generateInjectors(oc, g, pkg)
+		logTiming(ctx, "generate.package."+pkg.PkgPath+".injectors", injectorStart)
+		if len(genErrs) > 0 {
+			generated[i].Errs = genErrs
+			continue
+		}
+		copyStart := time.Now()
+		copyNonInjectorDecls(g, injectorFiles, pkg.TypesInfo)
+		logTiming(ctx, "generate.package."+pkg.PkgPath+".copy_non_injectors", copyStart)
+		frameStart := time.Now()
+		goSrc := g.frame(opts.Tags)
+		logTiming(ctx, "generate.package."+pkg.PkgPath+".frame", frameStart)
+		if len(opts.Header) > 0 {
+			goSrc = append(opts.Header, goSrc...)
+		}
+		formatStart := time.Now()
+		fmtSrc, err := format.Source(goSrc)
+		logTiming(ctx, "generate.package."+pkg.PkgPath+".format", formatStart)
+		if err != nil {
+			generated[i].Errs = append(generated[i].Errs, err)
+		} else {
+			goSrc = fmtSrc
+		}
+		generated[i].Content = goSrc
+		logTiming(ctx, "generate.package."+pkg.PkgPath+".total", pkgStart)
 	}
-	if allGeneratedOK(generated) {
-		writeManifest(wd, env, patterns, opts, pkgs)
-	}
+	writeGenerateOutputCache(cacheCandidates, generated)
 	return generated, nil
+}
+
+func detectOutputDir(paths []string) (string, error) {
+	if len(paths) == 0 {
+		return "", fmt.Errorf("no files to derive output directory from")
+	}
+	dir := filepath.Dir(paths[0])
+	for _, p := range paths[1:] {
+		if dir2 := filepath.Dir(p); dir2 != dir {
+			return "", fmt.Errorf("found conflicting directories %q and %q", dir, dir2)
+		}
+	}
+	return dir, nil
 }
 
 // generateInjectors generates the injectors for a given package.
@@ -652,7 +720,7 @@ func (ig *injectorGen) funcProviderCall(lname string, c *call, injectSig outputS
 		ig.p(", %s", ig.errVar)
 	}
 	ig.p(" := ")
-	ig.p("%s(", ig.g.qualifiedID(c.pkg.Name(), c.pkg.Path(), c.name))
+	ig.p("%s(", ig.funcProviderExpr(c))
 	for i, a := range c.args {
 		if i > 0 {
 			ig.p(", ")
@@ -680,6 +748,17 @@ func (ig *injectorGen) funcProviderCall(lname string, c *call, injectSig outputS
 		ig.p(", err\n")
 		ig.p("\t}\n")
 	}
+}
+
+func (ig *injectorGen) funcProviderExpr(c *call) string {
+	if c.methodExprRecv == nil {
+		return ig.g.qualifiedID(c.pkg.Name(), c.pkg.Path(), c.name)
+	}
+	recv := types.TypeString(c.methodExprRecv, ig.g.qualifyPkg)
+	if _, ok := c.methodExprRecv.(*types.Pointer); ok {
+		recv = "(" + recv + ")"
+	}
+	return recv + "." + c.name
 }
 
 func (ig *injectorGen) structProviderCall(lname string, c *call) {

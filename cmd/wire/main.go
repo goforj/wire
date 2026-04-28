@@ -39,8 +39,8 @@ func main() {
 	subcommands.Register(subcommands.CommandsCommand(), "")
 	subcommands.Register(subcommands.FlagsCommand(), "")
 	subcommands.Register(subcommands.HelpCommand(), "")
-	subcommands.Register(&checkCmd{}, "")
 	subcommands.Register(&cacheCmd{}, "")
+	subcommands.Register(&checkCmd{}, "")
 	subcommands.Register(&diffCmd{}, "")
 	subcommands.Register(&genCmd{}, "")
 	subcommands.Register(&watchCmd{}, "")
@@ -60,8 +60,8 @@ func main() {
 		"commands": true, // builtin
 		"help":     true, // builtin
 		"flags":    true, // builtin
-		"check":    true,
 		"cache":    true,
+		"check":    true,
 		"diff":     true,
 		"gen":      true,
 		"serve":    true,
@@ -178,6 +178,10 @@ func withTiming(ctx context.Context, enabled bool) context.Context {
 		return ctx
 	}
 	return wire.WithTiming(ctx, func(label string, dur time.Duration) {
+		if dur == 0 && strings.Contains(label, "=") {
+			log.Printf("timing: %s", label)
+			return
+		}
 		log.Printf("timing: %s=%s", label, dur)
 	})
 }
@@ -198,8 +202,3 @@ func newGenerateOptions(headerFile string) (*wire.GenerateOptions, error) {
 }
 
 // logErrors logs each error with consistent formatting.
-func logErrors(errs []error) {
-	for _, err := range errs {
-		log.Println(strings.Replace(err.Error(), "\n", "\n\t", -1))
-	}
-}

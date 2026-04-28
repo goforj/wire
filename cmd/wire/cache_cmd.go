@@ -19,46 +19,151 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 
-	"github.com/goforj/wire/internal/wire"
 	"github.com/google/subcommands"
+
+	"github.com/goforj/wire/internal/cachepaths"
+)
+
+const (
+	loaderArtifactDirEnv = cachepaths.LoaderArtifactDirEnv
+	outputCacheDirEnv    = cachepaths.OutputCacheDirEnv
 )
 
 type cacheCmd struct {
 	clear bool
 }
 
-// Name returns the subcommand name.
+type cacheTarget struct {
+	name string
+	path string
+}
+
 func (*cacheCmd) Name() string { return "cache" }
 
-// Synopsis returns a short summary of the subcommand.
 func (*cacheCmd) Synopsis() string {
 	return "inspect or clear the wire cache"
 }
 
-// Usage returns the help text for the subcommand.
 func (*cacheCmd) Usage() string {
-	return `cache [-clear]
+	return `cache
+cache clear
+cache -clear
 
-  By default, prints the cache directory. With -clear, removes all cache files.
+  By default, prints the cache directory. With -clear or clear, removes all
+  Wire-managed cache files.
 `
 }
 
-// SetFlags registers flags for the subcommand.
 func (cmd *cacheCmd) SetFlags(f *flag.FlagSet) {
-	f.BoolVar(&cmd.clear, "clear", false, "remove all cached data")
+	f.BoolVar(&cmd.clear, "clear", false, "clear Wire caches")
 }
 
-// Execute runs the subcommand.
 func (cmd *cacheCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
-	if cmd.clear {
-		if err := wire.ClearCache(); err != nil {
-			log.Printf("failed to clear cache: %v\n", err)
-			return subcommands.ExitFailure
+	_ = ctx
+	clearRequested := cmd.clear
+	switch extra := f.Args(); len(extra) {
+	case 0:
+		if !clearRequested {
+			root, err := wireCacheRoot(os.Environ())
+			if err != nil {
+				log.Println(err)
+				return subcommands.ExitFailure
+			}
+			fmt.Fprintln(os.Stdout, root)
+			return subcommands.ExitSuccess
 		}
-		log.Printf("cleared cache at %s\n", wire.CacheDir())
+	case 1:
+		if extra[0] == "clear" {
+			clearRequested = true
+			break
+		}
+		log.Printf("unknown cache action %q", extra[0])
+		log.Println(strings.TrimSpace(cmd.Usage()))
+		return subcommands.ExitFailure
+	default:
+		log.Println(strings.TrimSpace(cmd.Usage()))
+		return subcommands.ExitFailure
+	}
+	if !clearRequested {
+		log.Println(strings.TrimSpace(cmd.Usage()))
+		return subcommands.ExitFailure
+	}
+	cleared, err := clearWireCaches(os.Environ())
+	if err != nil {
+		log.Printf("failed to clear cache: %v\n", err)
+		return subcommands.ExitFailure
+	}
+	root, err := wireCacheRoot(os.Environ())
+	if err != nil {
+		log.Println(err)
+		return subcommands.ExitFailure
+	}
+	if len(cleared) == 0 {
+		log.Printf("cleared cache at %s\n", root)
 		return subcommands.ExitSuccess
 	}
-	fmt.Println(wire.CacheDir())
+	log.Printf("cleared cache at %s\n", root)
 	return subcommands.ExitSuccess
+}
+
+func wireCacheRoot(env []string) (string, error) {
+	root, err := cachepaths.Root(env)
+	if err != nil {
+		return "", fmt.Errorf("resolve user cache dir: %w", err)
+	}
+	return root, nil
+}
+
+func clearWireCaches(env []string) ([]string, error) {
+	base, err := wireCacheRoot(env)
+	if err != nil {
+		return nil, err
+	}
+	targets := wireCacheTargets(env, filepath.Dir(base))
+	cleared := make([]string, 0, len(targets))
+	for _, target := range targets {
+		info, err := os.Stat(target.path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return cleared, fmt.Errorf("stat %s cache: %w", target.name, err)
+		}
+		if !info.IsDir() {
+			if err := os.Remove(target.path); err != nil {
+				return cleared, fmt.Errorf("remove %s cache: %w", target.name, err)
+			}
+		} else if err := os.RemoveAll(target.path); err != nil {
+			return cleared, fmt.Errorf("remove %s cache: %w", target.name, err)
+		}
+		cleared = append(cleared, target.name)
+	}
+	return cleared, nil
+}
+
+func wireCacheTargets(env []string, userCacheDir string) []cacheTarget {
+	baseWire := cachepaths.EnvValueDefault(env, cachepaths.BaseDirEnv, filepath.Join(userCacheDir, "wire"))
+	targets := []cacheTarget{
+		{name: "loader-artifacts", path: cachepaths.EnvValueDefault(env, loaderArtifactDirEnv, filepath.Join(baseWire, "loader-artifacts"))},
+		{name: "discovery-cache", path: cachepaths.EnvValueDefault(env, cachepaths.DiscoveryCacheDirEnv, filepath.Join(baseWire, "discovery-cache"))},
+		{name: "output-cache", path: cachepaths.EnvValueDefault(env, outputCacheDirEnv, filepath.Join(baseWire, "output-cache"))},
+	}
+	seen := make(map[string]bool, len(targets))
+	deduped := make([]cacheTarget, 0, len(targets))
+	for _, target := range targets {
+		cleaned := filepath.Clean(target.path)
+		if seen[cleaned] {
+			continue
+		}
+		seen[cleaned] = true
+		target.path = cleaned
+		deduped = append(deduped, target)
+	}
+	sort.Slice(deduped, func(i, j int) bool { return deduped[i].name < deduped[j].name })
+	return deduped
 }

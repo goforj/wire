@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"os"
@@ -30,6 +31,8 @@ import (
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/types/typeutil"
+
+	"github.com/goforj/wire/internal/loader"
 )
 
 // A providerSetSrc captures the source for a type provided by a ProviderSet.
@@ -153,6 +156,10 @@ type Provider struct {
 	// Name is the name of the Go object.
 	Name string
 
+	// MethodExprRecv is the receiver type for a method expression provider.
+	// It is nil for package-level function providers.
+	MethodExprRecv types.Type
+
 	// Pos is the source position of the func keyword or type spec
 	// defining this provider.
 	Pos token.Pos
@@ -251,7 +258,7 @@ type Field struct {
 // takes precedence.
 func Load(ctx context.Context, wd string, env []string, tags string, patterns []string) (*Info, []error) {
 	loadStart := time.Now()
-	pkgs, loader, errs := load(ctx, wd, env, tags, patterns)
+	pkgs, errs := load(ctx, wd, env, tags, patterns, nil)
 	logTiming(ctx, "load.packages", loadStart)
 	if len(errs) > 0 {
 		return nil, errs
@@ -264,18 +271,12 @@ func Load(ctx context.Context, wd string, env []string, tags string, patterns []
 		Fset: fset,
 		Sets: make(map[ProviderSetID]*ProviderSet),
 	}
-	oc := newObjectCache(pkgs, loader)
+	oc := newObjectCache(pkgs)
 	ec := new(errorCollector)
 	for _, pkg := range pkgs {
 		if isWireImport(pkg.PkgPath) {
 			// The marker function package confuses analysis.
 			continue
-		}
-		if loaded, errs := oc.ensurePackage(pkg.PkgPath); len(errs) > 0 {
-			ec.add(errs...)
-			continue
-		} else if loaded != nil {
-			pkg = loaded
 		}
 		pkgStart := time.Now()
 		scope := pkg.Types.Scope()
@@ -364,46 +365,49 @@ func Load(ctx context.Context, wd string, env []string, tags string, patterns []
 // env is nil or empty, it is interpreted as an empty set of variables.
 // In case of duplicate environment variables, the last one in the list
 // takes precedence.
-func load(ctx context.Context, wd string, env []string, tags string, patterns []string) ([]*packages.Package, *lazyLoader, []error) {
+func load(ctx context.Context, wd string, env []string, tags string, patterns []string, discovery *loader.DiscoverySnapshot) ([]*packages.Package, []error) {
 	fset := token.NewFileSet()
-	baseCfg := &packages.Config{
-		Context:    ctx,
-		Mode:       packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps,
-		Dir:        wd,
+	loaderMode := effectiveLoaderMode(ctx, wd, env)
+	parseStats := &parseFileStats{}
+	loadStart := time.Now()
+	result, err := loader.New().LoadPackages(withLoaderTiming(ctx), loader.PackageLoadRequest{
+		WD:         wd,
 		Env:        env,
-		BuildFlags: []string{"-tags=wireinject"},
+		Tags:       tags,
+		Patterns:   append([]string(nil), patterns...),
+		Mode:       packages.LoadAllSyntax,
+		LoaderMode: loaderMode,
 		Fset:       fset,
+		Discovery:  discovery,
+		ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+			start := time.Now()
+			file, err := parser.ParseFile(fset, filename, src, parser.ParseComments|parser.SkipObjectResolution)
+			parseStats.record(false, time.Since(start), err, false)
+			return file, err
+		},
+	})
+	logTiming(ctx, "load.packages.load", loadStart)
+	var typedPkgs []*packages.Package
+	if result != nil {
+		typedPkgs = result.Packages
+		debugf(ctx, "load.packages.backend=%s", result.Backend)
+		if result.FallbackReason != loader.FallbackReasonNone {
+			debugf(ctx, "load.packages.fallback_reason=%s", result.FallbackReason)
+			if result.FallbackDetail != "" {
+				debugf(ctx, "load.packages.fallback_detail=%s", result.FallbackDetail)
+			}
+		}
 	}
-	if len(tags) > 0 {
-		baseCfg.BuildFlags[0] += " " + tags
-	}
-	escaped := make([]string, len(patterns))
-	for i := range patterns {
-		escaped[i] = "pattern=" + patterns[i]
-	}
-	baseLoadStart := time.Now()
-	pkgs, err := packages.Load(baseCfg, escaped...)
-	logTiming(ctx, "load.packages.base.load", baseLoadStart)
+	logLoadDebug(ctx, "typed", packages.LoadAllSyntax, strings.Join(patterns, ","), wd, typedPkgs, parseStats)
 	if err != nil {
-		return nil, nil, []error{err}
+		return nil, []error{err}
 	}
-	baseErrsStart := time.Now()
-	errs := collectLoadErrors(pkgs)
-	logTiming(ctx, "load.packages.base.collect_errors", baseErrsStart)
+	errs := collectLoadErrors(typedPkgs)
+	logTiming(ctx, "load.packages.collect_errors", loadStart)
 	if len(errs) > 0 {
-		return nil, nil, errs
+		return nil, errs
 	}
-
-	baseFiles := collectPackageFiles(pkgs)
-	loader := &lazyLoader{
-		ctx:       ctx,
-		wd:        wd,
-		env:       env,
-		tags:      tags,
-		fset:      fset,
-		baseFiles: baseFiles,
-	}
-	return pkgs, loader, nil
+	return typedPkgs, nil
 }
 
 func collectLoadErrors(pkgs []*packages.Package) []error {
@@ -456,7 +460,6 @@ type objectCache struct {
 	packages map[string]*packages.Package
 	objects  map[objRef]objCacheEntry
 	hasher   typeutil.Hasher
-	loader   *lazyLoader
 }
 
 type objRef struct {
@@ -469,7 +472,7 @@ type objCacheEntry struct {
 	errs []error
 }
 
-func newObjectCache(pkgs []*packages.Package, loader *lazyLoader) *objectCache {
+func newObjectCache(pkgs []*packages.Package) *objectCache {
 	if len(pkgs) == 0 {
 		panic("object cache must have packages to draw from")
 	}
@@ -478,10 +481,6 @@ func newObjectCache(pkgs []*packages.Package, loader *lazyLoader) *objectCache {
 		packages: make(map[string]*packages.Package),
 		objects:  make(map[objRef]objCacheEntry),
 		hasher:   typeutil.MakeHasher(),
-		loader:   loader,
-	}
-	if oc.fset == nil && loader != nil {
-		oc.fset = loader.fset
 	}
 	// Depth-first search of all dependencies to gather import path to
 	// packages.Package mapping. go/packages guarantees that for a single
@@ -515,24 +514,6 @@ func (oc *objectCache) registerPackages(pkgs []*packages.Package, replace bool) 
 	}
 }
 
-func (oc *objectCache) ensurePackage(pkgPath string) (*packages.Package, []error) {
-	if pkg := oc.packages[pkgPath]; pkg != nil && pkg.TypesInfo != nil && len(pkg.Syntax) > 0 {
-		return pkg, nil
-	}
-	if oc.loader == nil {
-		if pkg := oc.packages[pkgPath]; pkg != nil {
-			return pkg, nil
-		}
-		return nil, []error{fmt.Errorf("package %q is missing type information", pkgPath)}
-	}
-	loaded, errs := oc.loader.load(pkgPath)
-	if len(errs) > 0 {
-		return nil, errs
-	}
-	oc.registerPackages(loaded, true)
-	return oc.packages[pkgPath], nil
-}
-
 // get converts a Go object into a Wire structure. It may return a *Provider, an
 // *IfaceBinding, a *ProviderSet, a *Value, or a []*Field.
 func (oc *objectCache) get(obj types.Object) (val interface{}, errs []error) {
@@ -542,9 +523,6 @@ func (oc *objectCache) get(obj types.Object) (val interface{}, errs []error) {
 	}
 	if ent, cached := oc.objects[ref]; cached {
 		return ent.val, append([]error(nil), ent.errs...)
-	}
-	if _, errs := oc.ensurePackage(ref.importPath); len(errs) > 0 {
-		return nil, errs
 	}
 	defer func() {
 		oc.objects[ref] = objCacheEntry{
@@ -573,14 +551,160 @@ func (oc *objectCache) get(obj types.Object) (val interface{}, errs []error) {
 	}
 }
 
+func providerInputsForAllowedStructFields(st *types.Struct) []ProviderInput {
+	fields := make([]*types.Var, 0, st.NumFields())
+	for i := 0; i < st.NumFields(); i++ {
+		if isPrevented(st.Tag(i)) {
+			continue
+		}
+		fields = append(fields, st.Field(i))
+	}
+	return providerInputsForVars(fields)
+}
+
+func providerInputsForVars(vars []*types.Var) []ProviderInput {
+	args := make([]ProviderInput, 0, len(vars))
+	for _, v := range vars {
+		args = append(args, providerInputForVar(v))
+	}
+	return args
+}
+
+func providerInputForVar(v *types.Var) ProviderInput {
+	return ProviderInput{
+		Type:      v.Type(),
+		FieldName: v.Name(),
+	}
+}
+
+func newField(parent types.Type, v *types.Var, includePointer bool) *Field {
+	return &Field{
+		Parent: parent,
+		Name:   v.Name(),
+		Pkg:    v.Pkg(),
+		Pos:    v.Pos(),
+		Out:    fieldOutputTypes(v.Type(), includePointer),
+	}
+}
+
+func typeAndPointer(typ types.Type) []types.Type {
+	return []types.Type{typ, applyTypePointers(typ, 1)}
+}
+
+func fieldOutputTypes(typ types.Type, includePointer bool) []types.Type {
+	out := []types.Type{typ}
+	if includePointer {
+		out = append(out, applyTypePointers(typ, 1))
+	}
+	return out
+}
+
+func newStructProvider(typeName types.Object, out []types.Type) *Provider {
+	return &Provider{
+		Pkg:      typeName.Pkg(),
+		Name:     typeName.Name(),
+		Pos:      typeName.Pos(),
+		IsStruct: true,
+		Out:      out,
+	}
+}
+
+func (oc *objectCache) lookupPackageObject(importPath, name string) (types.Object, error) {
+	pkg := oc.packages[importPath]
+	if pkg == nil || pkg.Types == nil {
+		return nil, fmt.Errorf("missing typed package for %s", importPath)
+	}
+	return pkg.Types.Scope().Lookup(name), nil
+}
+
+func (oc *objectCache) lookupPackageFunc(importPath, name string) (*types.Func, error) {
+	obj, err := oc.lookupPackageObject(importPath, name)
+	if err != nil {
+		return nil, err
+	}
+	fn, ok := obj.(*types.Func)
+	if !ok || fn == nil {
+		return nil, fmt.Errorf("%s.%s is not a provider function", importPath, name)
+	}
+	return fn, nil
+}
+
+func applyTypePointers(typ types.Type, count int) types.Type {
+	for i := 0; i < count; i++ {
+		typ = types.NewPointer(typ)
+	}
+	return typ
+}
+
+func namedStructType(typeName types.Object) (types.Type, *types.Struct, bool) {
+	out := typeName.Type()
+	st, ok := out.Underlying().(*types.Struct)
+	return out, st, ok
+}
+
+func structFromFieldsParent(parent types.Type) (*types.Struct, bool, error) {
+	ptr, ok := parent.(*types.Pointer)
+	if !ok {
+		return nil, false, fmt.Errorf("parent type %s is not a pointer", types.TypeString(parent, nil))
+	}
+	switch t := ptr.Elem().Underlying().(type) {
+	case *types.Pointer:
+		st, ok := t.Elem().Underlying().(*types.Struct)
+		if !ok {
+			return nil, false, fmt.Errorf("parent type %s does not point to a struct", types.TypeString(parent, nil))
+		}
+		return st, true, nil
+	case *types.Struct:
+		return t, false, nil
+	default:
+		return nil, false, fmt.Errorf("parent type %s does not point to a struct", types.TypeString(parent, nil))
+	}
+}
+
+func lookupStructField(st *types.Struct, name string) *types.Var {
+	for i := 0; i < st.NumFields(); i++ {
+		if st.Field(i).Name() == name {
+			return st.Field(i)
+		}
+	}
+	return nil
+}
+
+func requiredStructField(st *types.Struct, name string) (*types.Var, error) {
+	v := lookupStructField(st, name)
+	if v == nil {
+		return nil, fmt.Errorf("field %q not found", name)
+	}
+	return v, nil
+}
+
+func lookupQuotedStructField(st *types.Struct, quotedName string) (*types.Var, int) {
+	for i := 0; i < st.NumFields(); i++ {
+		if strings.EqualFold(strconv.Quote(st.Field(i).Name()), quotedName) {
+			return st.Field(i), i
+		}
+	}
+	return nil, -1
+}
+
 // varDecl finds the declaration that defines the given variable.
 func (oc *objectCache) varDecl(obj *types.Var) *ast.ValueSpec {
 	// TODO(light): Walk files to build object -> declaration mapping, if more performant.
 	// Recommended by https://golang.org/s/types-tutorial
 	pkg := oc.packages[obj.Pkg().Path()]
+	if pkg == nil {
+		return nil
+	}
+	return valueSpecForVar(oc.fset, pkg.Syntax, obj)
+}
+
+func valueSpecForVar(fset *token.FileSet, files []*ast.File, obj *types.Var) *ast.ValueSpec {
 	pos := obj.Pos()
-	for _, f := range pkg.Syntax {
-		tokenFile := oc.fset.File(f.Pos())
+	for _, f := range files {
+		tokenFile := fset.File(f.Pos())
+		if tokenFile == nil {
+			continue
+		}
 		if base := tokenFile.Base(); base <= int(pos) && int(pos) < base+tokenFile.Size() {
 			path, _ := astutil.PathEnclosingInterval(f, pos, pos)
 			for _, node := range path {
@@ -598,6 +722,12 @@ func (oc *objectCache) varDecl(obj *types.Var) *ast.ValueSpec {
 func (oc *objectCache) processExpr(info *types.Info, pkgPath string, expr ast.Expr, varName string) (interface{}, []error) {
 	exprPos := oc.fset.Position(expr.Pos())
 	expr = astutil.Unparen(expr)
+	if sel, ok := expr.(*ast.SelectorExpr); ok {
+		if selInfo := info.Selections[sel]; selInfo != nil && selInfo.Kind() == types.MethodExpr {
+			p, errs := processMethodExprProvider(oc.fset, info, sel, selInfo)
+			return p, notePositionAll(exprPos, errs)
+		}
+	}
 	if obj := qualifiedIdentObject(info, expr); obj != nil {
 		item, errs := oc.get(obj)
 		return item, mapErrors(errs, func(err error) error {
@@ -698,15 +828,22 @@ func (oc *objectCache) processNewSet(info *types.Info, pkgPath string, call *ast
 	if len(ec.errors) > 0 {
 		return nil, ec.errors
 	}
-	var errs []error
-	pset.providerMap, pset.srcMap, errs = buildProviderMap(oc.fset, oc.hasher, pset)
-	if len(errs) > 0 {
-		return nil, errs
-	}
-	if errs := verifyAcyclic(pset.providerMap, oc.hasher); len(errs) > 0 {
+	if errs := oc.finalizeProviderSet(pset); len(errs) > 0 {
 		return nil, errs
 	}
 	return pset, nil
+}
+
+func (oc *objectCache) finalizeProviderSet(pset *ProviderSet) []error {
+	var errs []error
+	pset.providerMap, pset.srcMap, errs = buildProviderMap(oc.fset, oc.hasher, pset)
+	if len(errs) > 0 {
+		return errs
+	}
+	if errs := verifyAcyclic(pset.providerMap, oc.hasher); len(errs) > 0 {
+		return errs
+	}
+	return nil
 }
 
 // structArgType attempts to interpret an expression as a simple struct type.
@@ -750,20 +887,37 @@ func qualifiedIdentObject(info *types.Info, expr ast.Expr) types.Object {
 func processFuncProvider(fset *token.FileSet, fn *types.Func) (*Provider, []error) {
 	sig := fn.Type().(*types.Signature)
 	fpos := fn.Pos()
+	return processProviderSignature(fset, fn.Pkg(), fn.Name(), nil, fpos, sig)
+}
+
+func processMethodExprProvider(fset *token.FileSet, info *types.Info, expr *ast.SelectorExpr, sel *types.Selection) (*Provider, []error) {
+	obj, ok := sel.Obj().(*types.Func)
+	if !ok {
+		return nil, []error{fmt.Errorf("%s is not a function", expr.Sel.Name)}
+	}
+	sig, ok := info.TypeOf(expr).(*types.Signature)
+	if !ok {
+		return nil, []error{fmt.Errorf("method expression %s does not have a function signature", expr.Sel.Name)}
+	}
+	return processProviderSignature(fset, obj.Pkg(), obj.Name(), sel.Recv(), expr.Pos(), sig)
+}
+
+func processProviderSignature(fset *token.FileSet, pkg *types.Package, name string, recv types.Type, pos token.Pos, sig *types.Signature) (*Provider, []error) {
 	providerSig, err := funcOutput(sig)
 	if err != nil {
-		return nil, []error{notePosition(fset.Position(fpos), fmt.Errorf("wrong signature for provider %s: %v", fn.Name(), err))}
+		return nil, []error{notePosition(fset.Position(pos), fmt.Errorf("wrong signature for provider %s: %v", name, err))}
 	}
 	params := sig.Params()
 	provider := &Provider{
-		Pkg:        fn.Pkg(),
-		Name:       fn.Name(),
-		Pos:        fn.Pos(),
-		Args:       make([]ProviderInput, params.Len()),
-		Varargs:    sig.Variadic(),
-		Out:        []types.Type{providerSig.out},
-		HasCleanup: providerSig.cleanup,
-		HasErr:     providerSig.err,
+		Pkg:            pkg,
+		Name:           name,
+		MethodExprRecv: recv,
+		Pos:            pos,
+		Args:           make([]ProviderInput, params.Len()),
+		Varargs:        sig.Variadic(),
+		Out:            []types.Type{providerSig.out},
+		HasCleanup:     providerSig.cleanup,
+		HasErr:         providerSig.err,
 	}
 	for i := 0; i < params.Len(); i++ {
 		provider.Args[i] = ProviderInput{
@@ -771,7 +925,7 @@ func processFuncProvider(fset *token.FileSet, fn *types.Func) (*Provider, []erro
 		}
 		for j := 0; j < i; j++ {
 			if types.Identical(provider.Args[i].Type, provider.Args[j].Type) {
-				return nil, []error{notePosition(fset.Position(fpos), fmt.Errorf("provider has multiple parameters of type %s", types.TypeString(provider.Args[j].Type, nil)))}
+				return nil, []error{notePosition(fset.Position(pos), fmt.Errorf("provider has multiple parameters of type %s", types.TypeString(provider.Args[j].Type, nil)))}
 			}
 		}
 	}
@@ -834,8 +988,7 @@ func funcOutput(sig *types.Signature) (outputSignature, error) {
 // It will not support any new feature introduced after v0.2. Please use the new
 // wire.Struct syntax for those.
 func processStructLiteralProvider(fset *token.FileSet, typeName *types.TypeName) (*Provider, []error) {
-	out := typeName.Type()
-	st, ok := out.Underlying().(*types.Struct)
+	out, st, ok := namedStructType(typeName)
 	if !ok {
 		return nil, []error{fmt.Errorf("%v does not name a struct", typeName)}
 	}
@@ -846,14 +999,9 @@ func processStructLiteralProvider(fset *token.FileSet, typeName *types.TypeName)
 		notePosition(fset.Position(pos),
 			fmt.Errorf("using struct literal to inject %s is deprecated and will be removed in the next release; use wire.Struct instead",
 				typeName.Type())))
-	provider := &Provider{
-		Pkg:      typeName.Pkg(),
-		Name:     typeName.Name(),
-		Pos:      pos,
-		Args:     make([]ProviderInput, st.NumFields()),
-		IsStruct: true,
-		Out:      []types.Type{out, types.NewPointer(out)},
-	}
+	provider := newStructProvider(typeName, typeAndPointer(out))
+	provider.Pos = pos
+	provider.Args = make([]ProviderInput, st.NumFields())
 	for i := 0; i < st.NumFields(); i++ {
 		f := st.Field(i)
 		provider.Args[i] = ProviderInput{
@@ -894,36 +1042,19 @@ func processStructProvider(fset *token.FileSet, info *types.Info, call *ast.Call
 
 	stExpr := call.Args[0].(*ast.CallExpr)
 	typeName := qualifiedIdentObject(info, stExpr.Args[0]) // should be either an identifier or selector
-	provider := &Provider{
-		Pkg:      typeName.Pkg(),
-		Name:     typeName.Name(),
-		Pos:      typeName.Pos(),
-		IsStruct: true,
-		Out:      []types.Type{structPtr.Elem(), structPtr},
-	}
+	provider := newStructProvider(typeName, []types.Type{structPtr.Elem(), structPtr})
 	if allFields(call) {
-		for i := 0; i < st.NumFields(); i++ {
-			if isPrevented(st.Tag(i)) {
-				continue
-			}
-			f := st.Field(i)
-			provider.Args = append(provider.Args, ProviderInput{
-				Type:      f.Type(),
-				FieldName: f.Name(),
-			})
-		}
+		provider.Args = providerInputsForAllowedStructFields(st)
 	} else {
-		provider.Args = make([]ProviderInput, len(call.Args)-1)
+		fields := make([]*types.Var, 0, len(call.Args)-1)
 		for i := 1; i < len(call.Args); i++ {
 			v, err := checkField(call.Args[i], st)
 			if err != nil {
 				return nil, notePosition(fset.Position(call.Pos()), err)
 			}
-			provider.Args[i-1] = ProviderInput{
-				Type:      v.Type(),
-				FieldName: v.Name(),
-			}
+			fields = append(fields, v)
 		}
+		provider.Args = providerInputsForVars(fields)
 	}
 	for i := 0; i < len(provider.Args); i++ {
 		for j := 0; j < i; j++ {
@@ -1089,22 +1220,10 @@ func processFieldsOf(fset *token.FileSet, info *types.Info, call *ast.CallExpr) 
 		return nil, notePosition(fset.Position(call.Pos()),
 			fmt.Errorf(firstArgReqFormat, types.TypeString(structType, nil)))
 	}
-
-	var struc *types.Struct
-	isPtrToStruct := false
-	switch t := structPtr.Elem().Underlying().(type) {
-	case *types.Pointer:
-		struc, ok = t.Elem().Underlying().(*types.Struct)
-		if !ok {
-			return nil, notePosition(fset.Position(call.Pos()),
-				fmt.Errorf(firstArgReqFormat, types.TypeString(struc, nil)))
-		}
-		isPtrToStruct = true
-	case *types.Struct:
-		struc = t
-	default:
+	struc, isPtrToStruct, err := structFromFieldsParent(structPtr)
+	if err != nil {
 		return nil, notePosition(fset.Position(call.Pos()),
-			fmt.Errorf(firstArgReqFormat, types.TypeString(t, nil)))
+			fmt.Errorf(firstArgReqFormat, types.TypeString(structType, nil)))
 	}
 	if struc.NumFields() < len(call.Args)-1 {
 		return nil, notePosition(fset.Position(call.Pos()),
@@ -1117,19 +1236,7 @@ func processFieldsOf(fset *token.FileSet, info *types.Info, call *ast.CallExpr) 
 		if err != nil {
 			return nil, notePosition(fset.Position(call.Pos()), err)
 		}
-		out := []types.Type{v.Type()}
-		if isPtrToStruct {
-			// If the field is from a pointer to a struct, then
-			// wire.Fields also provides a pointer to the field.
-			out = append(out, types.NewPointer(v.Type()))
-		}
-		fields = append(fields, &Field{
-			Parent: structPtr.Elem(),
-			Name:   v.Name(),
-			Pkg:    v.Pkg(),
-			Pos:    v.Pos(),
-			Out:    out,
-		})
+		fields = append(fields, newField(structPtr.Elem(), v, isPtrToStruct))
 	}
 	return fields, nil
 }
@@ -1141,13 +1248,12 @@ func checkField(f ast.Expr, st *types.Struct) (*types.Var, error) {
 	if !ok {
 		return nil, fmt.Errorf("%v must be a string with the field name", f)
 	}
-	for i := 0; i < st.NumFields(); i++ {
-		if strings.EqualFold(strconv.Quote(st.Field(i).Name()), b.Value) {
-			if isPrevented(st.Tag(i)) {
-				return nil, fmt.Errorf("%s is prevented from injecting by wire", b.Value)
-			}
-			return st.Field(i), nil
+	v, i := lookupQuotedStructField(st, b.Value)
+	if v != nil {
+		if isPrevented(st.Tag(i)) {
+			return nil, fmt.Errorf("%s is prevented from injecting by wire", b.Value)
 		}
+		return v, nil
 	}
 	return nil, fmt.Errorf("%s is not a field of %s", b.Value, st.String())
 }
@@ -1322,5 +1428,11 @@ func bindShouldUsePointer(info *types.Info, call *ast.CallExpr) bool {
 	fun := call.Fun.(*ast.SelectorExpr)                 // wire.Bind
 	pkgName := fun.X.(*ast.Ident)                       // wire
 	wireName := info.ObjectOf(pkgName).(*types.PkgName) // wire package
-	return wireName.Imported().Scope().Lookup("bindToUsePointer") != nil
+	if imported := wireName.Imported(); imported != nil {
+		if isWireImport(imported.Path()) {
+			return true
+		}
+		return imported.Scope().Lookup("bindToUsePointer") != nil
+	}
+	return false
 }

@@ -14,28 +14,9 @@
 
 package wire
 
-import (
-	"encoding/json"
-	"os"
-)
+import "time"
 
 var (
-	osCreateTemp = os.CreateTemp
-	osMkdirAll   = os.MkdirAll
-	osReadFile   = os.ReadFile
-	osRemove     = os.Remove
-	osRemoveAll  = os.RemoveAll
-	osRename     = os.Rename
-	osStat       = os.Stat
-	osTempDir    = os.TempDir
-
-	jsonMarshal   = json.Marshal
-	jsonUnmarshal = json.Unmarshal
-
-	cacheKeyForPackageFunc      = cacheKeyForPackage
-	detectOutputDirFunc         = detectOutputDir
-	buildCacheFilesFunc         = buildCacheFiles
-	buildCacheFilesFromMetaFunc = buildCacheFilesFromMeta
-	rootPackageFilesFunc        = rootPackageFiles
-	hashFilesFunc               = hashFiles
+	timeNow   = time.Now
+	timeSince = time.Since
 )
