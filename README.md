@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./docs/assets/logo-v2.png" width="300" alt="goforj/wire logo">
+  <img src="https://raw.githubusercontent.com/goforj/wire/main/docs/assets/logo-v2.png" width="300" alt="goforj/wire logo">
 </p>
 
 <p align="center">
