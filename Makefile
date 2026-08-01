@@ -5,11 +5,12 @@ HELP_FUN = %help; while (<>) { /^([A-Za-z0-9_-]+)\s*:.*\#\#(?:@([A-Za-z0-9_-]+))
 help: ##@other Show this help.
 	@perl -e '$(HELP_FUN)' $(MAKEFILE_LIST)
 
-##@quality
-test: ##@quality Run the test suite.
+##@tests
+test: ##@tests Run the test suite.
 	go test ./...
 
-vet: ##@quality Run Go vet.
+##@analysis
+vet: ##@analysis Run Go vet.
 	go vet ./...
 
 ##@generation
