@@ -143,12 +143,16 @@ runtime dependency on Wire.
 
 ## Running generation manually
 
-Run the default command (alias for `wire gen`) or specify packages:
+Use `make generate` to run `wire gen` across the repository. The CLI remains useful for targeted generation:
 
 ```sh
 wire
 wire gen ./...
 ```
+
+## Development
+
+Use `make test` for the test suite and `make vet` for static checks.
 
 ## Watching for changes
 
