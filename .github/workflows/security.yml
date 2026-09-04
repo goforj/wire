@@ -1,6 +1,8 @@
 name: Security
 
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: "17 3 * * 1"
   workflow_dispatch:
@@ -11,7 +13,7 @@ permissions:
 
 jobs:
   dependency-review:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && vars.ENABLE_GITHUB_ADVANCED_SECURITY == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Review dependencies
@@ -61,12 +63,15 @@ jobs:
               module_count=$((module_count + 1))
               (
                 cd -- "$module_dir"
-                GOWORK=off go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.9.0 mod -output "$GITHUB_WORKSPACE/sbom/go-${module_count}.cdx.json"
+                GOWORK=off go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.9.0 mod -json -type library -test -output "$GITHUB_WORKSPACE/sbom/go-${module_count}.cdx.json"
               )
             fi
           done < <(find . -name go.mod -type f -not -path './.git/*' -not -path './node_modules/*' -not -path './vendor/*' -print0)
           test "$module_count" -gt 0
-          artifact_count=$(find sbom -type f -name '*.cdx.json' | wc -l | tr -d ' ')
+          for artifact in sbom/*.cdx.json; do
+            jq -e '.bomFormat == "CycloneDX" and .metadata.component.type == "library" and all(.components[]?; .name != "..")' "$artifact" >/dev/null
+          done
+          artifact_count=$(find sbom -type f -name '*.cdx.json' -size +0c | wc -l | tr -d ' ')
           test "$module_count" -eq "$artifact_count"
       - name: Upload SBOMs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -83,6 +88,8 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install Gitleaks
-        run: go install github.com/zricethezav/gitleaks/v8@v8.30.1
+        run: |
+          GOBIN="$RUNNER_TEMP/gitleaks" go install github.com/zricethezav/gitleaks/v8@v8.30.1
       - name: Scan Git history for secrets
-        run: gitleaks git . --redact --no-banner
+        run: |
+          "$RUNNER_TEMP/gitleaks/gitleaks" git . --redact --no-banner

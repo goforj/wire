@@ -542,7 +542,7 @@ func isIdent(s string) bool {
 // "C:\GOPATH" and running on Windows, the string
 // "C:\GOPATH\src\foo\bar.go:15:4" would be rewritten to "foo/bar.go:x:y".
 func scrubError(gopath string, s string) string {
-	s = normalizeHeaderRelativeError(s)
+	s = normalizeLegacyUnexportedName(normalizeHeaderRelativeError(s))
 	sb := new(strings.Builder)
 	query := gopath + string(os.PathSeparator) + "src" + string(os.PathSeparator)
 	for {
@@ -580,6 +580,26 @@ func scrubError(gopath string, s string) string {
 		s = s[linecolLen:]
 	}
 	return strings.TrimRight(sb.String(), "\n")
+}
+
+// normalizeLegacyUnexportedName aligns the Go 1.19 compiler diagnostic with newer Go releases.
+func normalizeLegacyUnexportedName(s string) string {
+	const marker = ": "
+	const suffix = " not exported by package "
+	idx := strings.Index(s, marker)
+	if idx == -1 {
+		return s
+	}
+	rest := s[idx+len(marker):]
+	end := strings.Index(rest, suffix)
+	if end == -1 {
+		return s
+	}
+	name := rest[:end]
+	if !isLowerIdent(name) {
+		return s
+	}
+	return s[:idx] + ": name " + rest
 }
 
 func normalizeHeaderRelativeError(s string) string {

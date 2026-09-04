@@ -3281,10 +3281,19 @@ func comparableErrors(errs []packages.Error) []string {
 			continue
 		}
 		pos := normalizeErrorPos(err.Pos)
-		add(pos + "|" + err.Msg)
+		add(pos + "|" + normalizeCompilerDiagnostic(err.Msg))
 	}
 	sort.Strings(out)
 	return out
+}
+
+// normalizeCompilerDiagnostic makes package-loader comparisons independent of Go's equivalent diagnostic wording.
+func normalizeCompilerDiagnostic(msg string) string {
+	const legacy = "undefined: "
+	if strings.HasPrefix(msg, legacy) {
+		return "undeclared name: " + strings.TrimPrefix(msg, legacy)
+	}
+	return msg
 }
 
 func hasPrefixLabel(labels []string, prefix string) bool {
@@ -3336,7 +3345,7 @@ func expandSummaryDiagnostics(msg string) []string {
 		}
 		if parts := strings.SplitN(line, ": ", 2); len(parts) == 2 {
 			pos := normalizeErrorPos(parts[0])
-			out = append(out, pos+"|"+parts[1])
+			out = append(out, pos+"|"+normalizeCompilerDiagnostic(parts[1]))
 			continue
 		}
 		out = append(out, line)
