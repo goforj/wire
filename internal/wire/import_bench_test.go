@@ -619,7 +619,7 @@ func appShapeGoMod(modulePath, wireModulePath, wireReplaceDir string, external b
 		extraRequires = `
 	github.com/alecthomas/kong v1.14.0
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/fsnotify/fsnotify v1.7.0
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/glebarez/sqlite v1.11.0
 	github.com/goforj/cache v0.1.5
 	github.com/goforj/crypt v1.1.0
