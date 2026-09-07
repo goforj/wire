@@ -633,7 +633,7 @@ func appShapeGoMod(modulePath, wireModulePath, wireReplaceDir string, external b
 	github.com/goforj/storage/driver/localstorage v0.2.5
 	github.com/goforj/storage/driver/redisstorage v0.2.5
 	github.com/goforj/str v1.3.0
-	github.com/google/go-cmp v0.6.0
+	github.com/google/go-cmp v0.7.0
 	github.com/google/subcommands v1.2.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
