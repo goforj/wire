@@ -115,6 +115,8 @@ func (cmd *showCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interf
 						out[types.TypeString(t, nil)] = v.Pos
 					case *wire.Field:
 						out[types.TypeString(t, nil)] = v.Pos
+					case *wire.SliceProvider:
+						out[types.TypeString(t, nil)] = v.Pos
 					default:
 						panic("unreachable")
 					}
@@ -151,7 +153,7 @@ func (cmd *showCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interf
 type outGroup struct {
 	name    string
 	inputs  *typeutil.Map // values are not important
-	outputs *typeutil.Map // values are *wire.Provider, *wire.Value, or *wire.Field
+	outputs *typeutil.Map // values identify providers, values, fields, or slice collections.
 }
 
 // gather flattens a provider set into outputs grouped by the inputs
@@ -205,18 +207,27 @@ func gather(info *wire.Info, key wire.ProviderSetID) (_ []outGroup, imports map[
 			case pv.IsArg():
 				// This is an injector argument.
 				inputVisited.Set(curr, -1)
-			case pv.IsProvider():
+			case pv.IsProvider() || pv.IsSlice():
+				var args []wire.ProviderInput
+				var output interface{}
+				if pv.IsProvider() {
+					args, output = pv.Provider().Args, pv.Provider()
+				} else {
+					output = pv.Slice()
+					for _, p := range pv.Slice().Providers {
+						args = append(args, p.Args...)
+					}
+				}
 				// Try to see if any args haven't been visited.
-				p := pv.Provider()
 				allPresent := true
-				for _, arg := range p.Args {
+				for _, arg := range args {
 					if inputVisited.At(arg.Type) == nil {
 						allPresent = false
 					}
 				}
 				if !allPresent {
 					stk = append(stk, curr)
-					for _, arg := range p.Args {
+					for _, arg := range args {
 						if inputVisited.At(arg.Type) == nil {
 							stk = append(stk, arg.Type)
 						}
@@ -227,7 +238,7 @@ func gather(info *wire.Info, key wire.ProviderSetID) (_ []outGroup, imports map[
 				// Build up set of input types, match to a group.
 				in := new(typeutil.Map)
 				in.SetHasher(hash)
-				for _, arg := range p.Args {
+				for _, arg := range args {
 					i := inputVisited.At(arg.Type).(int)
 					if i == -1 {
 						in.Set(arg.Type, true)
@@ -237,14 +248,14 @@ func gather(info *wire.Info, key wire.ProviderSetID) (_ []outGroup, imports map[
 				}
 				for i := range groups {
 					if sameTypeKeys(groups[i].inputs, in) {
-						groups[i].outputs.Set(curr, p)
+						groups[i].outputs.Set(curr, output)
 						inputVisited.Set(curr, i)
 						continue dfs
 					}
 				}
 				out := new(typeutil.Map)
 				out.SetHasher(hash)
-				out.Set(curr, p)
+				out.Set(curr, output)
 				inputVisited.Set(curr, len(groups))
 				groups = append(groups, outGroup{
 					inputs:  in,

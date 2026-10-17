@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -352,9 +353,13 @@ func TestGenImportHelpers(t *testing.T) {
 	}
 }
 
+// goBuildCheck compiles and runs a fixture to verify generated runtime behavior.
 func goBuildCheck(goToolPath, gopath string, test *testCase) error {
 	// Run `go build`.
 	testExePath := filepath.Join(gopath, "bin", "testprog")
+	if runtime.GOOS == "windows" {
+		testExePath += ".exe"
+	}
 	buildCmd := []string{"build", "-o", testExePath}
 	buildCmd = append(buildCmd, test.pkg)
 	cmd := exec.Command(goToolPath, buildCmd...)

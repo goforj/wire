@@ -44,6 +44,7 @@ type providerSetSrc struct {
 	Import      *ProviderSet
 	InjectorArg *InjectorArg
 	Field       *Field
+	Slice       *SliceProvider
 }
 
 // description returns a string describing the source of p, including line numbers.
@@ -72,6 +73,8 @@ func (p *providerSetSrc) description(fset *token.FileSet, typ types.Type) string
 		return fmt.Sprintf("argument %s to injector function %s (%s)", args.Tuple.At(p.InjectorArg.Index).Name(), args.Name, fset.Position(args.Pos))
 	case p.Field != nil:
 		return fmt.Sprintf("wire.FieldsOf (%s)", fset.Position(p.Field.Pos))
+	case p.Slice != nil:
+		return fmt.Sprintf("wire.Slice (%s)", fset.Position(p.Slice.Pos))
 	}
 	panic("providerSetSrc with no fields set")
 }
@@ -107,6 +110,12 @@ type ProviderSet struct {
 	Values    []*Value
 	Fields    []*Field
 	Imports   []*ProviderSet
+	// Slices contains only this set's explicit collection directives.
+	Slices []*SliceProvider
+	// sliceInputs preserves the relative order of collection directives and imports.
+	sliceInputs []*providerSetSrc
+	// sliceOutputs preserves first-contribution order when this set is imported.
+	sliceOutputs []types.Type
 	// InjectorArgs is only filled in for wire.Build.
 	InjectorArgs *InjectorArgs
 
@@ -115,7 +124,7 @@ type ProviderSet struct {
 	providerMap *typeutil.Map
 
 	// srcMap maps from provided type to a *providerSetSrc capturing the
-	// Provider, Binding, Value, or Import that provided the type.
+	// provider, binding, value, import, field, or collection that provided the type.
 	srcMap *typeutil.Map
 }
 
@@ -193,6 +202,18 @@ type ProviderInput struct {
 
 	// If the provider is a struct, FieldName will be the field name to set.
 	FieldName string
+}
+
+// SliceProvider describes an ordered collection whose elements have no global type bindings.
+type SliceProvider struct {
+	// Pos identifies the first collection directive contributing this output.
+	Pos token.Pos
+	// Out is the exact slice type, including any defined type name.
+	Out types.Type
+	// Providers retains constructor occurrence order without global result bindings.
+	Providers []*Provider
+	// sources keeps every contributing argument visible to unused-argument checks.
+	sources []*providerSetSrc
 }
 
 // Value describes a value expression.
@@ -515,7 +536,7 @@ func (oc *objectCache) registerPackages(pkgs []*packages.Package, replace bool) 
 }
 
 // get converts a Go object into a Wire structure. It may return a *Provider, an
-// *IfaceBinding, a *ProviderSet, a *Value, or a []*Field.
+// *IfaceBinding, a *ProviderSet, a *Value, a []*Field, or a *SliceProvider.
 func (oc *objectCache) get(obj types.Object) (val interface{}, errs []error) {
 	ref := objRef{
 		importPath: obj.Pkg().Path(),
@@ -718,7 +739,7 @@ func valueSpecForVar(fset *token.FileSet, files []*ast.File, obj *types.Var) *as
 }
 
 // processExpr converts an expression into a Wire structure. It may return a
-// *Provider, an *IfaceBinding, a *ProviderSet, a *Value or a []*Field.
+// *Provider, an *IfaceBinding, a *ProviderSet, a *Value, a []*Field, or a *SliceProvider.
 func (oc *objectCache) processExpr(info *types.Info, pkgPath string, expr ast.Expr, varName string) (interface{}, []error) {
 	exprPos := oc.fset.Position(expr.Pos())
 	expr = astutil.Unparen(expr)
@@ -780,6 +801,8 @@ func (oc *objectCache) processExpr(info *types.Info, pkgPath string, expr ast.Ex
 				return nil, []error{notePosition(exprPos, err)}
 			}
 			return v, nil
+		case "Slice":
+			return oc.processSlice(info, pkgPath, call)
 		default:
 			return nil, []error{notePosition(exprPos, errors.New("unknown pattern"))}
 		}
@@ -815,12 +838,18 @@ func (oc *objectCache) processNewSet(info *types.Info, pkgPath string, call *ast
 			pset.Providers = append(pset.Providers, item)
 		case *ProviderSet:
 			pset.Imports = append(pset.Imports, item)
+			if len(item.sliceOutputs) > 0 {
+				pset.sliceInputs = append(pset.sliceInputs, &providerSetSrc{Import: item})
+			}
 		case *IfaceBinding:
 			pset.Bindings = append(pset.Bindings, item)
 		case *Value:
 			pset.Values = append(pset.Values, item)
 		case []*Field:
 			pset.Fields = append(pset.Fields, item...)
+		case *SliceProvider:
+			pset.Slices = append(pset.Slices, item)
+			pset.sliceInputs = append(pset.sliceInputs, &providerSetSrc{Slice: item})
 		default:
 			panic("unknown item type")
 		}
@@ -1337,8 +1366,8 @@ func isProviderSetType(t types.Type) bool {
 }
 
 // ProvidedType represents a type provided from a source. The source
-// can be a *Provider (a provider function), a *Value (wire.Value), or an
-// *InjectorArgs (arguments to the injector function). The zero value has
+// can be a provider function, value, injector argument, field, or slice
+// collection. The zero value has
 // none of the above, and returns true for IsNil.
 type ProvidedType struct {
 	// t is the provided concrete type.
@@ -1347,11 +1376,12 @@ type ProvidedType struct {
 	v *Value
 	a *InjectorArg
 	f *Field
+	s *SliceProvider
 }
 
 // IsNil reports whether pt is the zero value.
 func (pt ProvidedType) IsNil() bool {
-	return pt.p == nil && pt.v == nil && pt.a == nil && pt.f == nil
+	return pt.p == nil && pt.v == nil && pt.a == nil && pt.f == nil && pt.s == nil
 }
 
 // Type returns the output type.
@@ -1361,6 +1391,7 @@ func (pt ProvidedType) IsNil() bool {
 //     whose element type is the struct type.
 //   - For a value, this is the type of the expression.
 //   - For an argument, this is the type of the argument.
+//   - For a slice collection, this is the declared slice type.
 func (pt ProvidedType) Type() types.Type {
 	return pt.t
 }
@@ -1383,6 +1414,19 @@ func (pt ProvidedType) IsArg() bool {
 // IsField reports whether pt points to a Fields.
 func (pt ProvidedType) IsField() bool {
 	return pt.f != nil
+}
+
+// IsSlice reports whether pt describes an explicit slice collection.
+func (pt ProvidedType) IsSlice() bool {
+	return pt.s != nil
+}
+
+// Slice returns the collection or panics if pt does not describe a collection.
+func (pt ProvidedType) Slice() *SliceProvider {
+	if pt.s == nil {
+		panic("ProvidedType does not hold a Slice")
+	}
+	return pt.s
 }
 
 // Provider returns pt as a Provider pointer. It panics if pt does not point

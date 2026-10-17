@@ -335,6 +335,7 @@ func TestProvidedTypeAccessors(t *testing.T) {
 	value := &Value{}
 	arg := &InjectorArg{}
 	field := &Field{}
+	slice := &SliceProvider{}
 
 	assertPanic := func(name string, fn func()) {
 		t.Helper()
@@ -350,6 +351,13 @@ func TestProvidedTypeAccessors(t *testing.T) {
 	assertPanic("Value", func() { zero.Value() })
 	assertPanic("Arg", func() { zero.Arg() })
 	assertPanic("Field", func() { zero.Field() })
+	assertPanic("Slice", func() { zero.Slice() })
+	if zero.IsSlice() || (ProvidedType{s: slice}).IsNil() {
+		t.Fatal("unexpected slice classification")
+	}
+	if got := (ProvidedType{s: slice}); !got.IsSlice() || got.Slice() != slice {
+		t.Fatal("expected slice")
+	}
 	if got := (ProvidedType{t: typ, p: provider}).Provider(); got != provider {
 		t.Fatal("expected provider")
 	}

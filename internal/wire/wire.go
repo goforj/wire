@@ -698,6 +698,8 @@ func injectPass(name string, sig *types.Signature, calls []call, set *ProviderSe
 			ig.valueExpr(lname, c)
 		case selectorExpr:
 			ig.fieldExpr(lname, c)
+		case sliceExpr:
+			ig.sliceExpr(lname, c)
 		default:
 			panic("unknown kind")
 		}

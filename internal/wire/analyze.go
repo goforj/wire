@@ -33,11 +33,11 @@ const (
 	structProvider
 	valueExpr
 	selectorExpr
+	sliceExpr
 )
 
-// A call represents a step of an injector function.  It may be either a
-// function call or a composite struct literal, depending on the value
-// of kind.
+// A call records one generated injector step, including constructor calls,
+// composite literals, values, and field selections.
 type call struct {
 	// kind indicates the code pattern to use.
 	kind callKind
@@ -113,6 +113,11 @@ func solve(fset *token.FileSet, out types.Type, given *types.Tuple, set *Provide
 	errAbort := errors.New("failed to visit")
 	var used []*providerSetSrc
 	var calls []call
+	var slices *typeutil.Map
+	type sliceProgress struct {
+		next int
+		args []int
+	}
 	type frame struct {
 		t    types.Type
 		from types.Type
@@ -180,9 +185,7 @@ dfs:
 				continue
 			}
 			args := make([]int, len(p.Args))
-			ins := make([]types.Type, len(p.Args))
 			for i := range p.Args {
-				ins[i] = p.Args[i].Type
 				v := index.At(p.Args[i].Type)
 				if v == errAbort {
 					index.Set(curr.t, errAbort)
@@ -191,27 +194,52 @@ dfs:
 				args[i] = v.(int)
 			}
 			index.Set(curr.t, given.Len()+len(calls))
-			kind := funcProviderCall
-			fieldNames := []string(nil)
-			if p.IsStruct {
-				kind = structProvider
-				for _, arg := range p.Args {
-					fieldNames = append(fieldNames, arg.FieldName)
+			calls = append(calls, providerCall(p, args, curr.t))
+		case pv.s != nil:
+			collection := pv.s
+			if slices == nil {
+				slices = new(typeutil.Map)
+			}
+			var progress *sliceProgress
+			if existing := slices.At(curr.t); existing != nil {
+				progress = existing.(*sliceProgress)
+			} else {
+				progress = &sliceProgress{args: make([]int, 0, len(collection.Providers))}
+				slices.Set(curr.t, progress)
+				used = append(used, collection.sources...)
+			}
+			if progress.next == len(collection.Providers) {
+				index.Set(curr.t, given.Len()+len(calls))
+				calls = append(calls, call{kind: sliceExpr, out: curr.t, args: progress.args})
+				continue
+			}
+			p := collection.Providers[progress.next]
+			visited := true
+			for i := len(p.Args) - 1; i >= 0; i-- {
+				if index.At(p.Args[i].Type) == nil {
+					if visited {
+						stk = append(stk, curr)
+						visited = false
+					}
+					stk = append(stk, frame{t: p.Args[i].Type, from: curr.t, up: &curr})
 				}
 			}
-			calls = append(calls, call{
-				kind:           kind,
-				pkg:            p.Pkg,
-				name:           p.Name,
-				methodExprRecv: p.MethodExprRecv,
-				args:           args,
-				varargs:        p.Varargs,
-				fieldNames:     fieldNames,
-				ins:            ins,
-				out:            curr.t,
-				hasCleanup:     p.HasCleanup,
-				hasErr:         p.HasErr,
-			})
+			if !visited {
+				continue
+			}
+			args := make([]int, len(p.Args))
+			for i, arg := range p.Args {
+				v := index.At(arg.Type)
+				if v == errAbort {
+					index.Set(curr.t, errAbort)
+					continue dfs
+				}
+				args[i] = v.(int)
+			}
+			progress.args = append(progress.args, given.Len()+len(calls))
+			calls = append(calls, providerCall(p, args, p.Out[0]))
+			progress.next++
+			stk = append(stk, curr)
 		case pv.IsValue():
 			v := pv.Value()
 			index.Set(curr.t, given.Len()+len(calls))
@@ -328,6 +356,18 @@ func verifyArgsUsed(set *ProviderSet, used []*providerSetSrc) []error {
 			errs = append(errs, fmt.Errorf("unused field %q.%s", f.Parent, f.Name))
 		}
 	}
+	for _, slice := range set.Slices {
+		found := false
+		for _, u := range used {
+			if u.Slice == slice {
+				found = true
+				break
+			}
+		}
+		if !found {
+			errs = append(errs, fmt.Errorf("unused wire.Slice for %s", slice.Out))
+		}
+	}
 	return errs
 }
 
@@ -360,6 +400,9 @@ func buildProviderMap(fset *token.FileSet, hasher typeutil.Hasher, set *Provider
 	for _, imp := range set.Imports {
 		src := &providerSetSrc{Import: imp}
 		imp.providerMap.Iterate(func(k types.Type, v interface{}) {
+			if pt := v.(*ProvidedType); pt.s != nil && types.Identical(k, pt.t) {
+				return
+			}
 			if prevSrc := srcMap.At(k); prevSrc != nil {
 				ec.add(bindingConflictError(fset, k, set, src, prevSrc.(*providerSetSrc)))
 				return
@@ -406,6 +449,10 @@ func buildProviderMap(fset *token.FileSet, hasher typeutil.Hasher, set *Provider
 	}
 	if len(ec.errors) > 0 {
 		return nil, nil, ec.errors
+	}
+
+	if errs := buildSliceProviderMap(fset, set, providerMap, srcMap); len(errs) > 0 {
+		return nil, nil, errs
 	}
 
 	// Process bindings in set. Must happen after the other providers to
@@ -468,14 +515,20 @@ func verifyAcyclic(providerMap *typeutil.Map, hasher typeutil.Hasher) []error {
 				// Leaf: values do not have dependencies.
 			case pt.IsArg():
 				// Injector arguments do not have dependencies.
-			case pt.IsProvider() || pt.IsField():
+			case pt.IsProvider() || pt.IsField() || pt.s != nil:
 				var args []types.Type
 				if pt.IsProvider() {
 					for _, arg := range pt.Provider().Args {
 						args = append(args, arg.Type)
 					}
-				} else {
+				} else if pt.IsField() {
 					args = append(args, pt.Field().Parent)
+				} else {
+					for _, p := range pt.s.Providers {
+						for _, arg := range p.Args {
+							args = append(args, arg.Type)
+						}
+					}
 				}
 				for _, a := range args {
 					hasCycle := false
@@ -488,9 +541,11 @@ func verifyAcyclic(providerMap *typeutil.Map, hasher typeutil.Hasher) []error {
 								if t.IsProvider() {
 									p := t.Provider()
 									fmt.Fprintf(sb, "%s (%s.%s) ->\n", types.TypeString(curr[j], nil), p.Pkg.Path(), p.Name)
-								} else {
+								} else if t.IsField() {
 									p := t.Field()
 									fmt.Fprintf(sb, "%s (%s.%s) ->\n", types.TypeString(curr[j], nil), p.Parent, p.Name)
+								} else {
+									fmt.Fprintf(sb, "%s (wire.Slice) ->\n", types.TypeString(curr[j], nil))
 								}
 							}
 							fmt.Fprintf(sb, "%s", types.TypeString(a, nil))

@@ -238,6 +238,104 @@ have a provider in the same set that provides the concrete type.
 [type identity]: https://golang.org/ref/spec#Type_identity
 [return concrete types]: https://github.com/golang/go/wiki/CodeReviewComments#interfaces
 
+### Collecting Providers into Slices
+
+Use `wire.Slice` when several constructors contribute to an ordered collection,
+such as event handlers or plugins. Assuming both constructors return values
+assignable to `Handler`:
+
+```go
+// initializeHandlers assembles handlers using the shared configuration.
+func initializeHandlers(config *Config) []Handler {
+    wire.Build(wire.Slice(new([]Handler), NewEmailHandler, NewAuditHandler))
+    return nil
+}
+```
+
+Wire generates ordinary Go calls and a slice literal:
+
+```go
+// initializeHandlers assembles handlers using the shared configuration.
+func initializeHandlers(config *Config) []Handler {
+    emailHandler := NewEmailHandler(config)
+    auditHandler := NewAuditHandler(config)
+    return []Handler{emailHandler, auditHandler}
+}
+```
+
+The first argument identifies the slice type using a pointer. Named slice types
+are supported, for example `new(EventHandlers)` where
+`type EventHandlers []Handler`. Distinct named slice types let an application
+inject separate collections with the same element type.
+
+The remaining arguments must be provider functions, including method
+expressions. They may return the same type, or different concrete types
+assignable to the slice's element type. Concrete implementations do not need
+`wire.Bind` inside a collection. Struct, value, set, and nested slice directives
+are not element constructors.
+
+Collection entries do not register ordinary bindings for their return types.
+For example, collecting two constructors returning `Handler` provides
+`[]Handler`, not an individually injectable `Handler`. Ordinary duplicate
+bindings remain errors. A normal provider or injector argument for `[]Handler`
+also conflicts with a `wire.Slice` for that same type.
+
+Contributions to the same slice type are combined in declaration order:
+
+```go
+// EmailSet contributes the first handler.
+var EmailSet = wire.NewSet(wire.Slice(new([]Handler), NewEmailHandler))
+
+// HandlerSet adds the audit handler after the imported email handler.
+var HandlerSet = wire.NewSet(
+    EmailSet,
+    wire.Slice(new([]Handler), NewAuditHandler),
+)
+```
+
+Nested sets expand at their position in `wire.NewSet` or `wire.Build`.
+Each listed occurrence produces a separate constructor call. Repeating a
+constructor, or importing a slice-only set twice, repeats its entries without
+deduplication. A constructor also registered as an ordinary provider is called
+separately for that binding. Normal constructor dependencies are shared by type,
+and each entry's dependencies are resolved before calling that constructor.
+
+Errors stop construction and clean up successfully acquired dependencies in
+reverse construction order, following the ordinary provider rules. Injector
+signatures must expose errors and cleanup functions when required. An explicit
+`wire.Slice(new([]Handler))` with no constructors provides a non-nil empty slice.
+
+A plain provider accepting `*EmailHandler` and `*AuditHandler` can also return
+`[]Handler` directly. A wrapper struct and a collection provider are useful when the
+members have distinct concrete types and names:
+
+```go
+// HandlerGroup names the fixed members of the collection.
+type HandlerGroup struct {
+    Email *EmailHandler
+    Audit *AuditHandler
+}
+
+// provideHandlers controls how named dependencies become a collection.
+func provideHandlers(group HandlerGroup) []Handler {
+    return []Handler{group.Email, group.Audit}
+}
+
+// HandlerSet assembles the wrapper using ordinary providers.
+var HandlerSet = wire.NewSet(
+    NewEmailHandler,
+    NewAuditHandler,
+    wire.Struct(new(HandlerGroup), "*"),
+    provideHandlers,
+)
+```
+
+Prefer that approach when assembly involves filtering, conditional membership,
+or other application logic. `wire.Slice` is for explicit ordered contributions
+that need no custom assembly code. A wrapper with two fields of the same
+interface type still needs distinct bindings or adapters; it does not remove
+Wire's ordinary same-type ambiguity.
+
 ### Struct Providers
 
 Structs can be constructed using provided types. Use the `wire.Struct` function

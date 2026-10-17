@@ -30,8 +30,8 @@ type ProviderSet struct{}
 
 // NewSet creates a new provider set that includes the providers in its
 // arguments. Each argument is a function value, a provider set, a call to
-// Struct, a call to Bind, a call to Value, a call to InterfaceValue or a call
-// to FieldsOf.
+// Struct, a call to Bind, a call to Value, a call to InterfaceValue, a call
+// to FieldsOf, or a call to Slice.
 //
 // Passing a function value to NewSet declares that the function's first
 // return value type will be provided by calling the function. The arguments
@@ -164,6 +164,34 @@ type StructProvider struct{}
 //	var Set = wire.NewSet(wire.Struct(new(S), "*")) -> inject all fields
 func Struct(structType interface{}, fieldNames ...string) StructProvider {
 	return StructProvider{}
+}
+
+// SliceProvider is a marker for an ordered collection of provider results.
+type SliceProvider struct{}
+
+// Slice collects provider results into a slice. The first argument must be a
+// pointer to a slice type, for example new([]Handler) or new(Handlers) where
+// Handlers is a named slice type. Each remaining argument must be a provider
+// function whose first return value is assignable to the slice's element type.
+// Provider parameters, errors, and cleanup functions follow the rules of NewSet.
+//
+// Contributions to the same slice type are concatenated in NewSet or Build
+// argument order, expanding nested sets at their position. Constructors are
+// called in that order, with each constructor's dependencies resolved first.
+// Each listed occurrence is a separate call, including repeated constructors or
+// repeated slice-only sets. Ordinary dependencies are shared through the normal
+// provider graph. Element results are only provided to the collection, not as
+// individual type bindings. A normal provider for the same slice type conflicts
+// with Slice. With no element providers, Slice provides a non-nil empty slice.
+//
+// Example:
+//
+//	var Set = wire.NewSet(
+//		NewConfig,
+//		wire.Slice(new([]Handler), NewEmailHandler, NewAuditHandler),
+//	)
+func Slice(sliceType interface{}, providers ...interface{}) SliceProvider {
+	return SliceProvider{}
 }
 
 // StructFields is a collection of the fields from a struct.

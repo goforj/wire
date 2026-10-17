@@ -1,0 +1,17 @@
+handlers: a,b,c,a
+created: dep,a,b,late,c,a
+cleaned: dep,a,b,late,c,a,clean:a,clean:c,clean:late,clean:b,clean:a,clean:dep
+dep: dep
+a: dep,a,clean:dep
+b: dep,a,b,clean:a,clean:dep
+late: dep,a,b,late,clean:b,clean:a,clean:dep
+c: dep,a,b,late,c,clean:late,clean:b,clean:a,clean:dep
+named: 1,2,3
+empty: 0 nil=false
+method: prefix/one,two
+count: 2
+repeated: 1,2
+alias: 1,2
+shared collection: 1 1 calls=1
+separate: 1/2
+single import: 1

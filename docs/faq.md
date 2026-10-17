@@ -86,6 +86,10 @@ func inject() *Bar {
 }
 ```
 
+For an ordered collection of values, `wire.Slice(new([]Foo), newFoo1, newFoo2)`
+can collect function results without creating competing bindings for `Foo`.
+This provides only `[]Foo`. See [collecting providers into slices](guide.md#collecting-providers-into-slices).
+
 ## Why does Wire forbid including the same provider multiple times?
 
 Wire forbids this to remain consistent with the principle that specifying
