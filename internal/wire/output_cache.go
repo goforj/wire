@@ -169,6 +169,11 @@ func outputCacheKey(wd string, opts *GenerateOptions, root *packages.Package) (s
 	sum.Write([]byte{'\n'})
 	sum.Write([]byte(opts.Tags))
 	sum.Write([]byte{'\n'})
+	if opts.GenerateCommand != "" {
+		sum.Write([]byte("generate-command\x00"))
+		sum.Write([]byte(opts.GenerateCommand))
+		sum.Write([]byte{'\x00'})
+	}
 	sum.Write([]byte(root.PkgPath))
 	sum.Write([]byte{'\n'})
 	workspace := detectWireModuleRoot(wd)

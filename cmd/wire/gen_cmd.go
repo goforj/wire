@@ -24,10 +24,11 @@ import (
 )
 
 type genCmd struct {
-	headerFile     string
-	prefixFileName string
-	tags           string
-	profile        profileFlags
+	generateCommand string
+	headerFile      string
+	prefixFileName  string
+	tags            string
+	profile         profileFlags
 }
 
 // Name returns the subcommand name.
@@ -50,6 +51,7 @@ func (*genCmd) Usage() string {
 
 // SetFlags registers flags for the subcommand.
 func (cmd *genCmd) SetFlags(f *flag.FlagSet) {
+	f.StringVar(&cmd.generateCommand, "generate_command", "", "command prefix for go:generate (default: go run -mod=mod github.com/goforj/wire/cmd/wire)")
 	f.StringVar(&cmd.headerFile, "header_file", "", "path to file to insert as a header in wire_gen.go")
 	f.StringVar(&cmd.prefixFileName, "output_file_prefix", "", "string to prepend to output file names.")
 	f.StringVar(&cmd.tags, "tags", "", "append build tags to the default wirebuild")
@@ -79,6 +81,7 @@ func (cmd *genCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interfa
 
 	opts.PrefixOutputFile = cmd.prefixFileName
 	opts.Tags = cmd.tags
+	opts.GenerateCommand = cmd.generateCommand
 
 	if !runGenerateCommand(ctx, wd, os.Environ(), packages(f), opts, cmd.profile.timings) {
 		return subcommands.ExitFailure

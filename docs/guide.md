@@ -177,6 +177,13 @@ written code is just normal Go code, and can be used without Wire.
 
 Once `wire_gen.go` is created, you can regenerate it by running [`go generate`].
 
+Projects that declare Wire as a Go tool dependency can instead run
+`go tool wire gen -generate_command="go tool wire"` to emit a workspace-compatible
+directive. The override and build tags are preserved across regeneration; the
+default invocation above is unchanged. See [project-owned tools and
+workspaces](../README.md#project-owned-tools-and-workspaces) for setup and custom
+wrapper argument rules.
+
 [`go generate`]: https://blog.golang.org/generate
 
 ## Advanced Features
