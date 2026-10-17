@@ -51,6 +51,36 @@ go install github.com/goforj/wire/cmd/wire@latest
 
 Ensure `$GOPATH/bin` is in your `$PATH`.
 
+### Project-owned tools and workspaces
+
+To manage Wire as a project tool dependency, add it to the module and opt into
+the tool-based generation command:
+
+```sh
+go get -tool github.com/goforj/wire/cmd/wire
+go tool wire gen -generate_command="go tool wire" ./...
+```
+
+Wire then emits a directive that keeps this choice on subsequent runs:
+
+```go
+//go:generate go tool wire gen -generate_command "go tool wire"
+```
+
+This works with `go generate` in a Go workspace without the default command's
+`-mod=mod` flag. The project must declare the Wire tool dependency. The tool
+directive requires Go 1.24 or newer; the selected Wire version's own Go minimum
+also applies.
+
+`-generate_command` is available on `gen`, `diff`, and `watch`. Its value is the
+command prefix that invokes Wire; Wire appends `gen`, the override itself, and
+any build tags. Custom wrappers must forward those arguments. Commands follow
+Go generate's argument rules, including Go-style double-quoted arguments and
+environment-variable expansion. They are not interpreted by a shell.
+
+Omitting the flag preserves the existing `go run -mod=mod` directive and generated
+output. To restore that default, run `wire gen` without the override.
+
 ## Compatibility with google/wire
 
 Wire remains compatible with codebases that import `github.com/google/wire`.
