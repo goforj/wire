@@ -10,6 +10,39 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
+// TestIsLocalWirePackage distinguishes mutable local sources from versioned dependencies.
+func TestIsLocalWirePackage(t *testing.T) {
+	root := t.TempDir()
+	tooling, sibling := filepath.Join(root, "tooling"), filepath.Join(root, "sibling")
+	for _, dir := range []string{tooling, sibling} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tests := []struct {
+		name string
+		pkg  *packages.Package
+		want bool
+	}{
+		{"nil", nil, false},
+		{"no files", &packages.Package{}, false},
+		{"current module", &packages.Package{GoFiles: []string{filepath.Join(tooling, "p.go")}}, true},
+		{"workspace sibling", &packages.Package{GoFiles: []string{filepath.Join(sibling, "p.go")}, Module: &packages.Module{Main: true, Dir: sibling}}, true},
+		{"filesystem replacement", &packages.Package{GoFiles: []string{filepath.Join(sibling, "p.go")}, Module: &packages.Module{Replace: &packages.Module{Dir: sibling}}}, true},
+		{"versioned replacement", &packages.Package{GoFiles: []string{filepath.Join(sibling, "p.go")}, Module: &packages.Module{Replace: &packages.Module{Dir: sibling, Version: "v1.2.3"}}}, false},
+		{"versioned dependency", &packages.Package{GoFiles: []string{filepath.Join(sibling, "p.go")}, Module: &packages.Module{Dir: sibling, Version: "v1.2.3"}}, false},
+		{"outside module directory", &packages.Package{GoFiles: []string{filepath.Join(root, "sibling-other", "p.go")}, Module: &packages.Module{Main: true, Dir: sibling}}, false},
+		{"incomplete module metadata", &packages.Package{GoFiles: []string{filepath.Join(sibling, "p.go")}, Module: &packages.Module{Main: true}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isLocalWirePackage(tooling, tt.pkg); got != tt.want {
+				t.Fatalf("isLocalWirePackage = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestOutputCacheEnabled(t *testing.T) {
 	ctx := context.Background()
 	tests := []struct {
