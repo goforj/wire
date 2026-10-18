@@ -20,80 +20,70 @@
   No runtime container, no reflection, no hidden magic - just fast, explicit initialization.
 </p>
 
-**GoForj Wire is a maintained fork of [Google Wire](https://github.com/google/wire),
-which is archived and no longer maintained.** Keep explicit constructor injection
-and ordinary generated Go code, with incremental generation, a native watcher,
-and project-owned tooling for modern Go workspaces. No GoForj framework dependency
-is required.
+**GoForj Wire is a maintained fork of [Google Wire](https://github.com/google/wire).**
+Google Wire is archived. This fork adds caching for faster repeat runs, watch
+mode, and support for `go tool wire`. You can use it in any Go project.
 
-Wire is a code generation tool that automates connecting components using
-[dependency injection][]. Dependencies between components are represented in
-Wire as function parameters, encouraging explicit initialization instead of
-global variables. Because Wire operates without runtime state or reflection,
-code written to be used with Wire is useful even for hand-written
-initialization.
+Wire connects your components by generating the Go code that calls their
+constructors. You write normal functions and declare which ones Wire can use.
+Wire works out the call order and passes each dependency where it's needed.
+The result is code you can read, debug, or write by hand.
 
 For an overview, see the [introductory blog post](https://blog.golang.org/wire).
 
-[dependency injection]: https://en.wikipedia.org/wiki/Dependency_injection
-[godoc]: https://godoc.org/github.com/goforj/wire
-
 ## Why GoForj Wire?
 
-The improvements are in the generator and development workflow. Providers,
-`wire.Build`, provider sets, interface bindings, and cleanup functions retain
-Wire's familiar model.
+Your providers, `wire.Build` calls, provider sets, interface bindings, and
+cleanup functions work the same way as in Google Wire. Here's what this fork adds:
 
-| Improvement over Google Wire | What it gives you |
+| Feature | How it helps |
 | --- | --- |
-| **Incremental generation** | Reuse package-loading and generated-output caches on repeated runs, reducing the wait as your dependency graph grows. See the [measured comparison](#generation-performance). |
-| **Native watch mode** | Run `wire watch ./...` once to regenerate as Go files change, with filesystem notifications and a polling fallback. |
-| **Project-owned generation commands** | Use `-generate_command="go tool wire"` to keep generated directives on the tool version declared by your project. This also avoids the default command's `-mod=mod` restriction in Go workspaces. |
-| **Workspace cache correctness** | Provider signature changes in sibling `go.work` modules and local replacements invalidate cached output, including when generation runs from a separate tooling module. Fixed in [v1.3.0](https://github.com/goforj/wire/releases/tag/v1.3.0). |
-| **Cache and profiling controls** | Inspect or clear Wire caches with `wire cache` and `wire cache clear`; use `-timings`, `-cpuprofile`, `-memprofile`, and `-trace` to investigate generation costs. |
-| **Ongoing maintenance** | Updated Go tooling dependencies, regression tests, and releases, while keeping the provider API small. |
+| **Faster repeat runs** | Wire caches package information and generated code so it can skip work on later runs. See the [benchmark results](#generation-performance). |
+| **Watch mode** | Run `wire watch ./...` to regenerate when Go files change. It uses filesystem notifications, with polling as a fallback. |
+| **Pin Wire in your project** | Use `-generate_command="go tool wire"` so `go generate` uses the Wire version in your `go.mod`. This also works in Go workspaces, where the default command's `-mod=mod` flag causes problems. |
+| **Workspace fixes** | Change a constructor in another module, rerun Wire, and its generated calls update too. This works with `go.work` and local `replace` directives, even if you keep Wire in a separate tools module. Fixed in [v1.3.0](https://github.com/goforj/wire/releases/tag/v1.3.0). |
+| **Cache and profiling tools** | Use `wire cache` to find the cache directory or `wire cache clear` to clear it. For slow runs, `-timings`, `-cpuprofile`, `-memprofile`, and `-trace` help you find where the time goes. |
 
-Generated injectors still call constructors directly. These improvements reduce
-generation work; they do not add a runtime container or change how your
-application resolves dependencies.
+The generated code still calls your constructors directly, with no runtime
+container or reflection.
 
 ### Generation performance
 
-The repository includes a reproducible comparison against Google Wire at
-[`9c25c90`](https://github.com/google/wire/commit/9c25c9016f6825302537c4efdd5e897976f9c826).
-One run of the synthetic import-scale benchmark on macOS ARM64 with Go 1.25.0,
-comparing GoForj Wire v1.3.0, produced:
+We compared GoForj Wire v1.3.0 with Google Wire at
+[`9c25c90`](https://github.com/google/wire/commit/9c25c9016f6825302537c4efdd5e897976f9c826)
+using test projects with 10, 100, and 1,000 imported packages. These results are
+from macOS ARM64 with Go 1.25.0:
 
-| Imported fixture packages | Google Wire | GoForj initial series | GoForj unchanged | Unchanged speedup vs. Google Wire |
+| Imported packages | Google Wire | GoForj initial runs | GoForj warmed cache | Warmed cache speedup |
 | ---: | ---: | ---: | ---: | ---: |
 | 10 | 21.2 ms | 16.9 ms | 3.7 ms | 5.69x |
 | 100 | 34.1 ms | 34.4 ms | 9.1 ms | 3.75x |
 | 1,000 | 180.8 ms | 193.8 ms | 71.9 ms | 2.52x |
 
-Each value is the median of three generator invocations. The benchmark runs
-`go list -deps` before each sample; the unchanged series also runs the generator
-once before each timed invocation. The initial series is labeled `cold` by the
-script, but reuses caches across its three trials, so it is not a fully cold-cache
-comparison. Timings exclude building the generator binaries.
+Each number is the median of three runs. The script runs `go list -deps` before
+each measurement. For the warmed-cache results, it also runs Wire once before
+timing it. The initial runs reuse caches across their three measurements, even
+though the script labels them `cold`. They aren't a fully cold-cache test.
+Building the generator binaries isn't included in the timings.
 
-The main benefit in this run is repeated generation. Initial runs can be slower,
-and results depend on graph shape, toolchain, hardware, and cache state. These
-numbers measure code generation, not application compilation or runtime speed.
+Repeat runs were faster in this test. The initial runs were slower at 1,000
+packages. Your results will depend on your project, toolchain, hardware, and
+cache state. These numbers time Wire, not `go build` or your running application.
 
-To reproduce from a repository checkout with Git history:
+Run the same comparison from a checkout with Git history:
 
 ```sh
 bash scripts/import-benchmarks.sh table
 ```
 
-The script prints the comparison table above with timings from your machine.
-For edits that change bodies, signatures, or imports, run
-`bash scripts/import-benchmarks.sh scenarios` to compare those paths separately.
+The script prints a table with your timings. To compare what happens after
+changing a function body, a constructor signature, or an import, run
+`bash scripts/import-benchmarks.sh scenarios`.
 
 ## Installing
 
-**Go 1.25 or later is required for v1.3.0.** Update local and CI toolchains
-before upgrading from an older release.
+**Wire v1.3.0 requires Go 1.25 or later.** Check your local and CI Go versions
+before upgrading.
 
 ```sh
 go install github.com/goforj/wire/cmd/wire@latest
@@ -101,41 +91,39 @@ go install github.com/goforj/wire/cmd/wire@latest
 
 Ensure `$GOPATH/bin` is in your `$PATH`.
 
-### Project-owned tools and workspaces
+### Pinning Wire in your project
 
-To manage Wire as a project tool dependency, add it to the module and opt into
-the tool-based generation command:
+To pin Wire's version in your `go.mod`, add it as a Go tool:
 
 ```sh
 go get -tool github.com/goforj/wire/cmd/wire@v1.3.0
 go tool wire gen -generate_command="go tool wire" ./...
 ```
 
-Wire then emits a directive that keeps this choice on subsequent runs:
+Wire adds this command to the generated file:
 
 ```go
 //go:generate go tool wire gen -generate_command "go tool wire"
 ```
 
-This works with `go generate` in a Go workspace without the default command's
-`-mod=mod` flag. The project must declare the Wire tool dependency. The tool
-directive was introduced in Go 1.24; Wire v1.3.0 requires Go 1.25 or later.
+Now `go generate` uses `go tool wire` too. This works inside a `go.work` workspace,
+where the default `go run -mod=mod` command would fail. Keep the tool dependency
+in your `go.mod`. Wire v1.3.0 requires Go 1.25 or later.
 
-`-generate_command` is available on `gen`, `diff`, and `watch`. Its value is the
-command prefix that invokes Wire; Wire appends `gen`, the override itself, and
-any build tags. Custom wrappers must forward those arguments. Commands follow
-Go generate's argument rules, including Go-style double-quoted arguments and
-environment-variable expansion. They are not interpreted by a shell.
+You can use `-generate_command` with `gen`, `diff`, and `watch`. Wire adds `gen`,
+the `-generate_command` flag, and any build tags to the command you supply. If
+you use a wrapper script, make sure it forwards those arguments. Quoting and
+environment variables follow `go generate` rules; shell operators aren't supported.
 
-Omitting the flag preserves the existing `go run -mod=mod` directive and generated
-output. To restore that default, run `wire gen` without the override.
+Without the flag, Wire generates its usual `go run -mod=mod` directive. Run
+`wire gen` without the flag to switch back to that default.
 
 ## Moving from Google Wire
 
-You can adopt this generator without rewriting provider sets or injector stubs.
-It recognizes both `github.com/google/wire` and `github.com/goforj/wire` imports.
-Keep your existing `github.com/google/wire` module requirement if your source
-still imports it; no module replacement is needed to use the fork's generator.
+Keep your existing provider sets and injector stubs. The generator accepts both
+`github.com/google/wire` and `github.com/goforj/wire` imports. If your code still
+imports Google Wire, keep that dependency in your `go.mod`. You don't need a
+`replace` directive to use this generator.
 
 Install the fork, then run it in your application's module:
 
@@ -144,16 +132,14 @@ go install github.com/goforj/wire/cmd/wire@v1.3.0
 wire gen ./...
 ```
 
-Review and commit the regenerated files. The default `//go:generate` directive
-now invokes `github.com/goforj/wire/cmd/wire`; generated files will therefore
-change even when the provider graph stays the same. For a pinned, project-owned
-tool or a `go.work` workspace, use the [tool dependency setup](#project-owned-tools-and-workspaces)
-instead.
+Review and commit the regenerated files. Their `//go:generate` command now points
+to `github.com/goforj/wire/cmd/wire`, so you'll see a diff even if your providers
+haven't changed. To pin the generator version or use it in a `go.work` workspace,
+follow [Pinning Wire in your project](#pinning-wire-in-your-project).
 
-New projects can import `github.com/goforj/wire` directly. The provider API stays
-familiar, and generated application code has no runtime dependency on Wire.
-The fork's Go 1.25 minimum applies to its module and generator; it does not
-require adding a runtime dependency to generated applications.
+New projects can import `github.com/goforj/wire` directly. Its module and generator
+require Go 1.25. The generated initialization code has no runtime dependency on
+Wire.
 
 ## How Wire Works (in 60 seconds)
 
@@ -235,7 +221,7 @@ runtime dependency on Wire.
 
 ## Running generation manually
 
-Use `make generate` to run `wire gen` across the repository. The CLI remains useful for targeted generation:
+Use `make generate` to run `wire gen` across this repository. In your own project, run:
 
 ```sh
 wire
@@ -255,7 +241,7 @@ wire watch
 wire watch ./...
 ```
 
-Detects the package root automatically and uses native filesystem notifications when available (with a polling fallback).
+Wire finds the package root automatically. It uses filesystem notifications when available and falls back to polling.
 
 ## Design Guidance
 
@@ -292,10 +278,9 @@ initialization is often simpler and clearer.
 
 ## Project Status
 
-This fork maintains Google Wire's provider model while improving generation
-performance, workspace support, and developer tooling. Compatibility with existing
-provider definitions is a core goal. See the [release notes](https://github.com/goforj/wire/releases)
-for shipped changes and toolchain requirements.
+We maintain this fork so existing Wire projects can keep using it with current
+Go tooling. See the [release notes](https://github.com/goforj/wire/releases) for
+changes and required Go versions.
 
 ## Community
 
