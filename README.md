@@ -33,6 +33,11 @@ For an overview, see the [introductory blog post](https://blog.golang.org/wire).
 
 ## Why GoForj Wire?
 
+**Fast reruns, even with hundreds of dependencies.** In our test apps, unchanged
+generation was **84-109x faster than Google Wire** with warm caches. After a
+function body edit, it was **18-19x faster**. See the [benchmarks](#generation-performance)
+for project sizes, timings, and first-run costs.
+
 Your providers, `wire.Build` calls, provider sets, interface bindings, and
 cleanup functions work the same way as in Google Wire. Here's what this fork adds:
 
@@ -50,35 +55,45 @@ container or reflection.
 ### Generation performance
 
 We compared GoForj Wire v1.3.0 with Google Wire at
-[`9c25c90`](https://github.com/google/wire/commit/9c25c9016f6825302537c4efdd5e897976f9c826)
-using test projects with 10, 100, and 1,000 imported packages. These results are
-from macOS ARM64 with Go 1.25.0:
+[`9c25c90`](https://github.com/google/wire/commit/9c25c9016f6825302537c4efdd5e897976f9c826).
+For a test app with **117 local packages and 342 external packages**, these were
+the median times across five runs:
 
-| Imported packages | Google Wire | GoForj initial runs | GoForj warmed cache | Warmed cache speedup |
-| ---: | ---: | ---: | ---: | ---: |
-| 10 | 21.2 ms | 16.9 ms | 3.7 ms | 5.69x |
-| 100 | 34.1 ms | 34.4 ms | 9.1 ms | 3.75x |
-| 1,000 | 180.8 ms | 193.8 ms | 71.9 ms | 2.52x |
+| Change | Google Wire | GoForj Wire | Speedup |
+| --- | ---: | ---: | ---: |
+| Unchanged | 1,582.0 ms | 18.9 ms | 83.7x |
+| Function body edit | 1,580.0 ms | 87.3 ms | 18.1x |
+| Constructor argument added | 1,604.8 ms | 262.6 ms | 6.1x |
+| Import added | 1,567.2 ms | 267.8 ms | 5.9x |
 
-Each number is the median of three runs. The script runs `go list -deps` before
-each measurement. For the warmed-cache results, it also runs Wire once before
-timing it. The initial runs reuse caches across their three measurements, even
-though the script labels them `cold`. They aren't a fully cold-cache test.
-Building the generator binaries isn't included in the timings.
+The app with 42 local and 342 external packages reached **109x** on unchanged
+runs. The project with 1,016 local packages and few external dependencies saw
+**9x**. The kind of dependencies matters as well as the package count.
 
-Repeat runs were faster in this test. The initial runs were slower at 1,000
-packages. Your results will depend on your project, toolchain, hardware, and
-cache state. These numbers time Wire, not `go build` or your running application.
+These measurements use Go 1.25.0 on an Apple M4 Max, with Go's dependency build
+data already cached. Each edit starts from a warmed Wire cache. They time
+**code generation**, not `go build` or your running application.
 
-Run the same comparison from a checkout with Git history:
+First runs can be slower while Wire builds its caches. The workspace fix also
+adds some checking: in the large local workspace, a cached rerun went from
+59.9 to 62.9 ms. With opt-in content hashing, it went from 62.1 to 72.6 ms because
+Wire now reads sibling files that older releases skipped.
+
+We also compared v1.2.0 and v1.3.0 across Go 1.25, 1.26, and 1.27, checked cold
+caches, and compiled the generated code after edits. See the
+[full results and raw measurements](docs/performance.md) for the release
+comparison, cache settings, and tradeoffs.
+
+To run the repository's application benchmark:
 
 ```sh
-bash scripts/import-benchmarks.sh table
+bash scripts/import-benchmarks.sh scenarios
 ```
 
-The script prints a table with your timings. To compare what happens after
-changing a function body, a constructor signature, or an import, run
-`bash scripts/import-benchmarks.sh scenarios`.
+That runner prints three-run medians and includes a cold Go cache case. The
+five-run comparison above warms Go's dependency build data first; the full
+report explains both setups. For the smaller import-only test, run
+`bash scripts/import-benchmarks.sh table`.
 
 ## Installing
 
