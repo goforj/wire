@@ -29,7 +29,118 @@ constructors. You write normal functions and declare which ones Wire can use.
 Wire works out the call order and passes each dependency where it's needed.
 The result is code you can read, debug, or write by hand.
 
-For an overview, see the [introductory blog post](https://blog.golang.org/wire).
+Already using Google Wire? This fork generated code **84-109x faster on unchanged
+runs** in our larger test apps with warm caches. See
+[what the fork adds](#why-goforj-wire) and the [measured tradeoffs](#generation-performance).
+
+## Why would I use Wire?
+
+**Keep writing constructors. Stop maintaining the code that connects them.**
+
+An orders API and a background worker might share a service, which needs a
+repository, an inventory client, and a mailer. Wiring that by hand is straightforward:
+
+```go
+// InitializeApp connects the API and worker to the same order service.
+func InitializeApp(cfg Config, db *sql.DB, logger *slog.Logger) *App {
+    repo := NewOrderRepository(db)
+    inventory := NewInventoryClient(cfg)
+    mailer := NewMailer(cfg)
+    orders := NewOrderService(repo, inventory, mailer)
+    handler := NewOrderHandler(orders, logger)
+    worker := NewOrderWorker(orders, logger)
+    return NewApp(handler, worker)
+}
+```
+
+There is nothing wrong with this code. The work comes later: a constructor
+changes, a dependency needs its own dependencies, or another command needs a
+different combination of the same services. You update each setup function and
+keep the call order, arguments, and shared instances straight.
+
+With Wire, you list the constructors once and declare what you want to build:
+
+```go
+//go:build wireinject
+
+package orders
+
+import (
+    "database/sql"
+    "log/slog"
+
+    "github.com/goforj/wire"
+)
+
+// AppSet lists the constructors available to the application.
+var AppSet = wire.NewSet(
+    NewOrderRepository,
+    NewInventoryClient,
+    NewMailer,
+    NewOrderService,
+    NewOrderHandler,
+    NewOrderWorker,
+    NewApp,
+)
+
+// InitializeApp connects the API and worker to the same order service.
+func InitializeApp(cfg Config, db *sql.DB, logger *slog.Logger) *App {
+    wire.Build(AppSet)
+    return nil
+}
+```
+
+Run `wire gen`. Wire writes `wire_gen.go` with the same constructor calls as
+the manual version above. The build tag keeps the stub out of normal builds.
+`Config`, `App`, and the constructors are your application's ordinary Go code;
+Wire doesn't require a container or special constructor signatures.
+
+### When a dependency changes
+
+Suppose orders now need an audit log. You add a constructor and change the
+service's signature:
+
+```go
+// NewAuditLog creates an audit log backed by the application's database.
+func NewAuditLog(db *sql.DB) *AuditLog {
+    return &AuditLog{db: db}
+}
+
+// NewOrderService supplies the dependencies needed to process orders.
+func NewOrderService(
+    repo *OrderRepository,
+    inventory *InventoryClient,
+    mailer *Mailer,
+    audit *AuditLog,
+) *OrderService {
+    return &OrderService{repo: repo, inventory: inventory, mailer: mailer, audit: audit}
+}
+```
+
+Add `NewAuditLog` to `AppSet` and rerun Wire. You don't edit the injector's
+signature or hand-update its constructor calls. The generated code now includes:
+
+```go
+orderRepository := NewOrderRepository(db)
+inventoryClient := NewInventoryClient(cfg)
+mailer := NewMailer(cfg)
+auditLog := NewAuditLog(db)
+orderService := NewOrderService(orderRepository, inventoryClient, mailer, auditLog)
+```
+
+The handler and worker still receive the same `orderService`. If you forget to
+register `NewAuditLog`, generation fails with a missing-provider error and shows
+the dependency chain that needs it. You find out before starting the app.
+
+**You still own the design.** You choose constructors, interfaces, and which
+values enter the injector. Wire follows those choices; it doesn't discover
+services at runtime. Tests can call `NewOrderService` directly with test
+dependencies, without running Wire.
+
+If your app has a few constructors and one setup function, hand wiring is
+probably enough. Wire earns its place when keeping those calls up to date across
+a growing application becomes repetitive. Start with the
+[working tutorial](_tutorial/README.md) to try it.
 
 ## Why GoForj Wire?
 
@@ -155,84 +266,6 @@ follow [Pinning Wire in your project](#pinning-wire-in-your-project).
 New projects can import `github.com/goforj/wire` directly. Its module and generator
 require Go 1.25. The generated initialization code has no runtime dependency on
 Wire.
-
-## How Wire Works (in 60 seconds)
-
-Wire is a **compile-time dependency injection** tool. Instead of building a runtime
-container, Wire generates ordinary Go code that explicitly initializes your
-application.
-
-There are only two concepts to learn:
-
-### Providers
-
-A provider is a normal Go function that produces a value (and optionally an error).
-
-```go
-func NewDB(cfg Config) (*sql.DB, error) {
-    // ...
-}
-```
-
-Dependencies are expressed as function parameters - no globals, no hidden state.
-
-### Injectors
-
-An injector is a stub function whose body calls `wire.Build(...)`.
-Wire replaces this stub with generated code that calls providers in dependency
-order.
-
-```go
-func InitializeApp(cfg Config) (*App, error) {
-    wire.Build(AppSet)
-    return nil, nil
-}
-```
-
-The generated output is plain Go - readable, debuggable, and fast.
-
-## Minimal Example
-
-```go
-// providers.go
-type Message string
-
-func ProvideMessage() Message {
-    return "hello wire"
-}
-
-type Greeter struct {
-    Msg Message
-}
-
-func NewGreeter(msg Message) *Greeter {
-    return &Greeter{Msg: msg}
-}
-
-var GreeterSet = wire.NewSet(
-    ProvideMessage,
-    NewGreeter,
-)
-```
-
-```go
-// wire.go
-//go:build wireinject
-
-func InitializeGreeter() *Greeter {
-    wire.Build(GreeterSet)
-    return nil
-}
-```
-
-Generate the injector:
-
-```sh
-wire
-```
-
-Wire produces `wire_gen.go` containing explicit initialization code with no
-runtime dependency on Wire.
 
 ## Running generation manually
 
