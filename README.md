@@ -337,3 +337,7 @@ For questions and discussion, use
 
 This project follows the Go
 [Code of Conduct](./CODE_OF_CONDUCT.md).
+
+## Documentation
+
+Read the [wire library documentation](https://goforj.dev/wire) for standalone installation, usage, and API reference.
