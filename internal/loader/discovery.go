@@ -35,6 +35,7 @@ type goListRequest struct {
 	SkipCompiled bool
 }
 
+// runGoList preserves source classifications across live and cached package discovery.
 func runGoList(ctx context.Context, req goListRequest) (map[string]*packageMeta, error) {
 	cacheReadStart := time.Now()
 	if cached, ok := readDiscoveryCache(req); ok {
@@ -101,6 +102,11 @@ func runGoList(ctx context.Context, req goListRequest) (map[string]*packageMeta,
 		for i, name := range meta.GoFiles {
 			if !filepath.IsAbs(name) {
 				meta.GoFiles[i] = filepath.Join(meta.Dir, name)
+			}
+		}
+		for i, name := range meta.CgoFiles {
+			if !filepath.IsAbs(name) {
+				meta.CgoFiles[i] = filepath.Join(meta.Dir, name)
 			}
 		}
 		for i, name := range meta.CompiledGoFiles {

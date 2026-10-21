@@ -42,6 +42,7 @@ type unsupportedError struct {
 
 func (e unsupportedError) Error() string { return e.reason }
 
+// packageMeta preserves Go's file classification so native sources cannot disappear during cached discovery.
 type packageMeta struct {
 	ImportPath      string
 	Name            string
@@ -49,6 +50,7 @@ type packageMeta struct {
 	DepOnly         bool
 	Export          string
 	GoFiles         []string
+	CgoFiles        []string
 	CompiledGoFiles []string
 	Imports         []string
 	ImportMap       map[string]string
@@ -265,12 +267,19 @@ func loadPackagesCustom(ctx context.Context, req PackageLoadRequest) (*PackageLo
 	}, nil
 }
 
+// loadCustomPackagesFromMeta rejects native source before import errors can hide the fallback signal.
 func loadCustomPackagesFromMeta(ctx context.Context, wd string, env []string, fset *token.FileSet, meta map[string]*packageMeta, targets map[string]struct{}, rootPaths []string, parseFile ParseFileFunc, discoveryDuration time.Duration, mode string) ([]*packages.Package, error) {
 	if len(meta) == 0 {
 		return nil, unsupportedError{reason: "empty go list result"}
 	}
 	if len(rootPaths) == 0 {
 		return nil, unsupportedError{reason: "no root packages from metadata"}
+	}
+	workspace := detectModuleRoot(wd)
+	for _, pkg := range meta {
+		if pkg != nil && len(pkg.CgoFiles) != 0 && isLocalSourcePackage(workspace, pkg) {
+			return nil, unsupportedError{reason: "local cgo source requires the native Go package loader"}
+		}
 	}
 	if fset == nil {
 		fset = token.NewFileSet()
@@ -1046,12 +1055,16 @@ func normalizeImports(imports []string, importMap map[string]string) []string {
 	return out
 }
 
+// metaFiles retains native import fingerprints when discovery intentionally skips compiled files.
 func metaFiles(meta *packageMeta) []string {
 	if meta == nil {
 		return nil
 	}
 	if len(meta.CompiledGoFiles) > 0 {
 		return meta.CompiledGoFiles
+	}
+	if len(meta.CgoFiles) != 0 {
+		return append(append([]string(nil), meta.GoFiles...), meta.CgoFiles...)
 	}
 	return meta.GoFiles
 }
