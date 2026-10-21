@@ -48,7 +48,7 @@ type discoveryFileFingerprint struct {
 	Hash string
 }
 
-const discoveryCacheVersion = 5
+const discoveryCacheVersion = 6
 
 func readDiscoveryCache(req goListRequest) (map[string]*packageMeta, bool) {
 	entry, err := loadDiscoveryCacheEntry(req)
