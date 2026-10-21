@@ -29,9 +29,10 @@ import (
 )
 
 type diffCmd struct {
-	headerFile string
-	tags       string
-	profile    profileFlags
+	generateCommand string
+	headerFile      string
+	tags            string
+	profile         profileFlags
 }
 
 // Name returns the subcommand name.
@@ -58,6 +59,7 @@ func (*diffCmd) Usage() string {
 
 // SetFlags registers flags for the subcommand.
 func (cmd *diffCmd) SetFlags(f *flag.FlagSet) {
+	f.StringVar(&cmd.generateCommand, "generate_command", "", "command prefix for go:generate (default: go run -mod=mod github.com/goforj/wire/cmd/wire)")
 	f.StringVar(&cmd.headerFile, "header_file", "", "path to file to insert as a header in wire_gen.go")
 	f.StringVar(&cmd.tags, "tags", "", "append build tags to the default wirebuild")
 	cmd.profile.addFlags(f)
@@ -90,6 +92,7 @@ func (cmd *diffCmd) Execute(ctx context.Context, f *flag.FlagSet, args ...interf
 	}
 
 	opts.Tags = cmd.tags
+	opts.GenerateCommand = cmd.generateCommand
 
 	genStart := time.Now()
 	outs, errs := wire.Generate(ctx, wd, os.Environ(), packages(f), opts)

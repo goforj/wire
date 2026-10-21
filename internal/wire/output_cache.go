@@ -169,6 +169,11 @@ func outputCacheKey(wd string, opts *GenerateOptions, root *packages.Package) (s
 	sum.Write([]byte{'\n'})
 	sum.Write([]byte(opts.Tags))
 	sum.Write([]byte{'\n'})
+	if opts.GenerateCommand != "" {
+		sum.Write([]byte("generate-command\x00"))
+		sum.Write([]byte(opts.GenerateCommand))
+		sum.Write([]byte{'\x00'})
+	}
 	sum.Write([]byte(root.PkgPath))
 	sum.Write([]byte{'\n'})
 	workspace := detectWireModuleRoot(wd)
@@ -248,9 +253,17 @@ func reachablePackages(root *packages.Package) []*packages.Package {
 	return out
 }
 
+// isLocalWirePackage includes sibling workspace modules and filesystem replacements whose sources can change independently of cached export paths.
 func isLocalWirePackage(workspace string, pkg *packages.Package) bool {
 	if pkg == nil || len(pkg.GoFiles) == 0 {
 		return false
+	}
+	if mod := pkg.Module; mod != nil {
+		if mod.Main && mod.Dir != "" {
+			workspace = mod.Dir
+		} else if mod.Replace != nil && mod.Replace.Version == "" && mod.Replace.Dir != "" {
+			workspace = mod.Replace.Dir
+		}
 	}
 	dir := filepath.Dir(pkg.GoFiles[0])
 	dir = canonicalWirePath(dir)

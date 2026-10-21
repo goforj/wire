@@ -1208,6 +1208,22 @@ func packageStub(fset *token.FileSet, meta *packageMeta) *packages.Package {
 		CompiledGoFiles: append([]string(nil), metaFiles(meta)...),
 		Imports:         make(map[string]*packages.Package),
 		ExportFile:      meta.Export,
+		Module:          packageModule(meta.Module),
+	}
+}
+
+// packageModule preserves workspace and replacement identities for downstream source cache invalidation.
+func packageModule(mod *goListModule) *packages.Module {
+	if mod == nil {
+		return nil
+	}
+	return &packages.Module{
+		Path:    mod.Path,
+		Version: mod.Version,
+		Main:    mod.Main,
+		Dir:     mod.Dir,
+		GoMod:   mod.GoMod,
+		Replace: packageModule(mod.Replace),
 	}
 }
 
